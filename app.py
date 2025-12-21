@@ -19,6 +19,8 @@ import time
 import shutil
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
+
 
 APP_ROOT = Path(__file__).resolve().parent
 UPLOAD_DIR = APP_ROOT / "uploads"
@@ -390,6 +392,20 @@ job_dirs = sorted(
     reverse=True
 )
 
+auto_refresh = st.checkbox("Auto-refresh while running", value=True)
+
+# Decide if we should refresh: only if any visible job is running
+running_any = False
+for jd in job_dirs[:10]:
+    s = read_status(jd)
+    if s and s.get("state") == "running":
+        running_any = True
+        break
+
+if auto_refresh and running_any:
+    # rerun page every 1s while something is running
+    st_autorefresh(interval=1000, key="jobs_autorefresh")
+
 # Filter out completed jobs by default (this is the “close once done” behavior)
 if not show_completed_jobs:
     job_dirs = [jd for jd in job_dirs if not is_completed(read_status_safe(jd))]
@@ -417,6 +433,9 @@ else:
         state = s.get("state", "unknown")
         msg = s.get("message", "")
         st.caption(f"{state} — {msg}")
+
+        if s.get("diarization_log"):
+            st.caption(f"Diarization log: {s['diarization_log']}")
 
         # ----------------------------
         # Stage sub-progress (0..100)

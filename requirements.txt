@@ -7,3 +7,4 @@ ffmpeg-python
 torch==2.9.0+cu130
 torchvision==0.24.0+cu130
 torchaudio==2.9.0+cu130
+streamlit-autorefresh

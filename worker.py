@@ -103,27 +103,76 @@ def ffmpeg_denoise(in_wav: Path, out_wav: Path) -> None:
 # -------------------------
 # Diarization via subprocess (isolated env)
 # -------------------------
-def diarize_via_cli(audio_path: Path, out_csv: Path, *, min_speakers: int = 2) -> None:
-    if not DIAR_PYTHON.exists():
-        raise RuntimeError(f"Missing diarization python: {DIAR_PYTHON}")
-    if not DIARIZE_CLI.exists():
-        raise RuntimeError(f"Missing diarization script: {DIARIZE_CLI}")
+def _read_json(path: Path) -> dict | None:
+    try:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def diarize_via_cli_with_progress(audio_path: Path, out_csv: Path, job_dir: Path, sw: StatusWriter, *, min_speakers: int = 2) -> None:
+    diar_status = job_dir / "diarization_status.json"
+    diar_log = job_dir / "diarize_cli.log"
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         str(DIAR_PYTHON),
+        "-u",  # unbuffered so logs flush quickly
         str(DIARIZE_CLI),
         "--audio", str(audio_path),
         "--out-csv", str(out_csv),
         "--min-speakers", str(int(min_speakers)),
+        "--status-json", str(diar_status),
     ]
 
-    # inherit env so HF_TOKEN is visible
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    subprocess.check_call(cmd, env=env)
+    sw.update(stage="diarization", stage_progress=0, message="starting diarization subprocess", progress=30, force=True,
+              diarization_status_path=str(diar_status), diarization_log=str(diar_log))
+
+    with open(diar_log, "w") as logf:
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
+
+        last_seen = None
+        while True:
+            rc = proc.poll()
+            js = _read_json(diar_status)
+
+            # Forward progress to Streamlit status.json
+            if js:
+                last_seen = js
+                p = int(js.get("progress", 0) or 0)
+                p = max(0, min(100, p))
+                msg = js.get("message") or "diarizing…"
+                stage = js.get("stage") or "diarization"
+
+                # Map overall worker progress 30..60 during diarization
+                overall = 30 + int((p / 100.0) * 30)
+
+                sw.update(
+                    stage="diarization",
+                    stage_progress=p,
+                    message=f"{stage}: {msg}",
+                    progress=overall,
+                )
+            else:
+                # No json yet — still provide heartbeat in UI
+                sw.update(stage="diarization", message="diarizing… (waiting for diarization_status.json)", progress=31)
+
+            if rc is not None:
+                break
+            time.sleep(0.5)
+
+        if rc != 0:
+            # Pull the best available structured error
+            err = None
+            if last_seen and last_seen.get("error"):
+                err = last_seen["error"]
+            raise RuntimeError(f"diarize_cli failed (rc={rc}). {err or 'See diarize_cli.log for details.'}")
 
 def main():
     ap = argparse.ArgumentParser()
@@ -186,11 +235,11 @@ def main():
         seg_csv = job_dir / "segments.csv"
         sw.update(stage="diarization", stage_progress=0, message="speaker diarization (pyannote)", progress=30, force=True)
 
-        diarize_via_cli(den_wav, seg_csv, min_speakers=2)
+        diarize_via_cli_with_progress(den_wav, seg_csv, job_dir, sw, min_speakers=2)
 
+        # verify + load
         if not seg_csv.exists():
             raise RuntimeError(f"Diarization finished but output CSV not found: {seg_csv}")
-
         df = pd.read_csv(seg_csv)
         n = int(len(df))
 
