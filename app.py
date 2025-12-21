@@ -331,7 +331,6 @@ else:
 
 
 ## Video PROCESS ##
-
 st.subheader("2) Process video (background job)")
 
 if selected is None:
@@ -348,7 +347,10 @@ else:
         )
         st.success(f"Started job: {jd.name}")
 
+## List the jobs ##
 st.subheader("Jobs (latest first)")
+show_completed = st.checkbox("Show completed jobs", value=False)
+
 
 def read_status_safe(job_dir: Path):
     p = job_dir / "status.json"
@@ -372,6 +374,10 @@ if do_cleanup:
         if not jd.is_dir():
             continue
         s = read_status_safe(jd)
+        if not s:
+            continue
+        if (not show_completed) and s.get("state") == "done":
+            continue
         if is_completed(s) and jd.stat().st_mtime < cutoff:
             shutil.rmtree(jd, ignore_errors=True)
             deleted += 1
