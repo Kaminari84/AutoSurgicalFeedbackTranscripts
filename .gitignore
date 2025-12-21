@@ -34,3 +34,4 @@ jobs/
 # OS/editor
 .DS_Store
 .vscode/
+app_test.py

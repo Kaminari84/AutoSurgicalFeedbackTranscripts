@@ -15,12 +15,18 @@ import cv2
 from PIL import Image
 import pytesseract
 
+import time
+import shutil
 
 import streamlit as st
 
 APP_ROOT = Path(__file__).resolve().parent
 UPLOAD_DIR = APP_ROOT / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+AUDIO_DIR = APP_ROOT / "audio"
+AUDIO_DIR.mkdir(exist_ok=True)
+
 JOBS_DIR = APP_ROOT / "jobs"
 JOBS_DIR.mkdir(exist_ok=True)
 
@@ -145,6 +151,14 @@ with st.sidebar:
     st.header("Controls")
     st.write("User:", os.getenv("USER", "unknown"))
     st.write("Upload dir:", str(UPLOAD_DIR))
+
+    st.divider()
+    st.subheader("Jobs")
+    show_completed_jobs = st.checkbox("Show completed jobs", value=False)
+    max_jobs_to_show = st.number_input("Max jobs to show", min_value=1, max_value=200, value=20)
+
+    cleanup_hours = st.number_input("Delete completed jobs older than (hours)", min_value=0, max_value=24*30, value=24)
+    do_cleanup = st.button("Delete old completed jobs")
 
 st.subheader("1) Add video")
 
@@ -313,19 +327,64 @@ else:
         st.success(f"Started job: {jd.name}")
 
 st.subheader("Jobs (latest first)")
-job_dirs = sorted([p for p in JOBS_DIR.glob("*") if p.is_dir()], reverse=True)
+
+def read_status_safe(job_dir: Path):
+    p = job_dir / "status.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+def is_completed(status: dict | None) -> bool:
+    if not status:
+        return False
+    return status.get("state") in {"done", "failed", "canceled"}
+
+# Optional: cleanup completed jobs older than cutoff
+if do_cleanup:
+    cutoff = time.time() - float(cleanup_hours) * 3600.0
+    deleted = 0
+    for jd in JOBS_DIR.glob("*"):
+        if not jd.is_dir():
+            continue
+        s = read_status_safe(jd)
+        if is_completed(s) and jd.stat().st_mtime < cutoff:
+            shutil.rmtree(jd, ignore_errors=True)
+            deleted += 1
+    st.success(f"Deleted {deleted} completed job(s).")
+
+# Sort by modification time (more accurate than reverse name)
+job_dirs = sorted(
+    [p for p in JOBS_DIR.glob("*") if p.is_dir()],
+    key=lambda p: p.stat().st_mtime,
+    reverse=True
+)
+
+# Filter out completed jobs by default (this is the “close once done” behavior)
+if not show_completed_jobs:
+    job_dirs = [jd for jd in job_dirs if not is_completed(read_status_safe(jd))]
+
+job_dirs = job_dirs[: int(max_jobs_to_show)]
 
 if not job_dirs:
-    st.info("No jobs yet.")
+    st.info("No jobs to show (toggle 'Show completed jobs' in the sidebar to see finished ones).")
 else:
-    for jd in job_dirs[:10]:
+    for jd in job_dirs:
         st.write(f"**{jd.name}**")
-        s = read_status(jd)
+        s = read_status_safe(jd)
+
         if not s:
             st.caption("No status yet…")
             continue
-        st.progress(int(s.get("progress", 0)))
+
+        # progress should be 0..100
+        prog = int(s.get("progress", 0) or 0)
+        prog = max(0, min(100, prog))
+        st.progress(prog)
         st.caption(f"{s.get('state')} — {s.get('message')}")
+
         with st.expander("Details", expanded=False):
             st.json(s)
             lp = jd / "worker.log"
