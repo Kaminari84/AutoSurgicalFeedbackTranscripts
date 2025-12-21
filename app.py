@@ -87,12 +87,12 @@ def start_job(input_path: Path, clock_start: str | None = None, clock_roi: tuple
         "--job-dir", str(job_dir),
     ]
 
-    if clock_start:
-        cmd += ["--clock-start", clock_start]
+    if clock_start is not None and clock_start.strip():
+        cmd += ["--clock-start", clock_start.strip()]
 
-    if clock_roi:
-        # store as "l,t,r,b"
+    if clock_roi is not None:
         cmd += ["--clock-roi", ",".join(map(str, clock_roi))]
+
 
     with open(log_path, "w") as logf:
         subprocess.Popen(
@@ -412,6 +412,16 @@ else:
         prog = max(0, min(100, prog))
         st.progress(prog)
         st.caption(f"{s.get('state')} — {s.get('message')}")
+
+        seg_i = s.get("segment_i")
+        seg_n = s.get("segment_n")
+        stage_p = s.get("stage_progress")
+
+        if seg_n:
+            if stage_p is not None:
+                st.progress(int(stage_p))
+            if seg_i is not None:
+                st.caption(f"Segments: {seg_i}/{seg_n}")
 
         with st.expander("Details", expanded=False):
             st.json(s)

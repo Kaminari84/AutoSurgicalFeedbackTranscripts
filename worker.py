@@ -1,27 +1,54 @@
+#!/usr/bin/env python3
 import argparse
 import json
 import os
-import time
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
+import re
+
 
 APP_ROOT = Path(__file__).resolve().parent
 AUDIO_ROOT = APP_ROOT / "audio"
 AUDIO_ROOT.mkdir(exist_ok=True)
 
-def write_status(p: Path, d: dict):
-    p.write_text(json.dumps(d, indent=2))
+TIME_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d:[0-5]\d$")
 
+
+# ----------------------------
+# Atomic status writing (throttled)
+# ----------------------------
+def atomic_write_json(path: Path, data: dict):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
+
+
+class StatusWriter:
+    def __init__(self, status_path: Path, status: dict, every_sec: float = 0.5):
+        self.status_path = status_path
+        self.status = status
+        self.every_sec = every_sec
+        self.last_write = 0.0
+
+    def update(self, *, force: bool = False, **fields):
+        now = time.time()
+        for k, v in fields.items():
+            self.status[k] = v
+        if force or (now - self.last_write) >= self.every_sec:
+            atomic_write_json(self.status_path, self.status)
+            self.last_write = now
+
+
+# ----------------------------
+# FFmpeg audio helpers
+# ----------------------------
 def run(cmd: list[str]):
-    # Keep logs clean; ffmpeg still prints errors if something breaks
-    return subprocess.check_call(cmd)
+    subprocess.check_call(cmd)
 
 
 def ffmpeg_extract_audio(video_path: Path, out_wav: Path, sr: int = 16000, channels: int = 2):
-    """
-    Extract audio track to PCM WAV at sr Hz. Keeps stereo by default.
-    """
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y",
@@ -37,10 +64,6 @@ def ffmpeg_extract_audio(video_path: Path, out_wav: Path, sr: int = 16000, chann
 
 
 def ffmpeg_denoise(in_wav: Path, out_wav: Path):
-    """
-    Simple denoise using ffmpeg's afftdn filter.
-    You can tune later; this is a reasonable starter.
-    """
     out_wav.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y",
@@ -53,20 +76,12 @@ def ffmpeg_denoise(in_wav: Path, out_wav: Path):
     run(cmd)
 
 
-def parse_roi(s: str):
-    # "l,t,r,b"
-    parts = [int(x) for x in s.split(",")]
-    if len(parts) != 4:
-        raise ValueError("clock-roi must be 'left,top,right,bottom'")
-    return tuple(parts)
-
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--input", required=True)
-    ap.add_argument("--job-dir", required=True)
-    ap.add_argument("--clock-start", default=None)
-    ap.add_argument("--clock-roi", default=None)
+    ap.add_argument("--input", required=True, help="video path")
+    ap.add_argument("--job-dir", required=True, help="job directory")
+    ap.add_argument("--clock-start", default=None, help="HH:MM:SS from app.py")
+    ap.add_argument("--clock-roi", default=None, help="left,top,right,bottom from app.py (stored only)")
     args = ap.parse_args()
 
     video_path = Path(args.input)
@@ -74,90 +89,86 @@ def main():
     job_dir.mkdir(parents=True, exist_ok=True)
     status_path = job_dir / "status.json"
 
+    clock_start = (args.clock_start or "").strip() or None
+    if clock_start is not None and not TIME_RE.match(clock_start):
+        # Don’t fail the job — just record it as invalid and continue.
+        clock_start_invalid = clock_start
+        clock_start = None
+    else:
+        clock_start_invalid = None
+
     status = {
         "state": "running",
         "pid": os.getpid(),
         "started": datetime.now().isoformat(timespec="seconds"),
         "input": str(video_path),
+
         "progress": 0,
+        "stage": None,
+        "stage_progress": 0,
         "message": "starting",
-        "clock_start": args.clock_start,
-        "clock_roi": None,
+
+        # Step 1 provenance (record-only)
+        "clock_start": clock_start,
+        "clock_start_invalid": clock_start_invalid,
+        "clock_roi": args.clock_roi,  # stored as string, no parsing here
+
+        # Step 2 outputs
+        "raw_audio_path": None,
+        "denoised_audio_path": None,
     }
 
-    if args.clock_roi:
-        try:
-            status["clock_roi"] = parse_roi(args.clock_roi)
-        except Exception as e:
-            status["clock_roi_error"] = str(e)
-
-    write_status(status_path, status)
+    atomic_write_json(status_path, status)
+    sw = StatusWriter(status_path, status, every_sec=0.5)
 
     try:
         # -------------------------
+        # Step 1: record-only
+        # -------------------------
+        sw.update(stage="clock", stage_progress=100, progress=10, message="clock params recorded", force=True)
+
+        # -------------------------
         # Step 2: Extract + denoise audio
         # -------------------------
-        status["message"] = "extracting audio (raw)"
-        status["progress"] = 5
-        write_status(status_path, status)
+        sw.update(stage="audio", stage_progress=0, progress=15, message="extracting audio (raw)", force=True)
 
         audio_dir = AUDIO_ROOT / job_dir.name
         raw_wav = audio_dir / "audio_raw_16k_stereo.wav"
         den_wav = audio_dir / "audio_denoised_16k_stereo.wav"
 
         ffmpeg_extract_audio(video_path, raw_wav, sr=16000, channels=2)
-
-        status["message"] = "denoising audio"
-        status["progress"] = 15
-        status["raw_audio_path"] = str(raw_wav)
-        write_status(status_path, status)
+        sw.update(raw_audio_path=str(raw_wav), stage_progress=60, progress=30, message="denoising audio", force=True)
 
         ffmpeg_denoise(raw_wav, den_wav)
-
-        status["denoised_audio_path"] = str(den_wav)
-        status["message"] = "audio ready"
-        status["progress"] = 20
-        write_status(status_path, status)
+        sw.update(denoised_audio_path=str(den_wav), stage_progress=100, progress=45, message="audio ready", force=True)
 
         # -------------------------
-        # Keep your placeholders for now
-        # (we’ll replace these with diarization/transcription next)
+        # Placeholders for Steps 3–5
         # -------------------------
-        stages = [
-            ("speaker diarization", 40),
-            ("transcribe segments", 70),
-            ("score + write CSV", 95),
-        ]
-        for msg, prog in stages:
-            status["message"] = msg
-            status["progress"] = prog
-            write_status(status_path, status)
-            time.sleep(1)
+        sw.update(
+            stage="pending",
+            stage_progress=0,
+            progress=45,
+            message="TODO: Step 3 diarization, Step 4 transcription, Step 5 scoring + transcripts CSV",
+            force=True,
+        )
 
-        # torch smoke test (optional)
-        try:
-            import torch
-            status["torch"] = torch.__version__
-            status["cuda_available"] = bool(torch.cuda.is_available())
-            if torch.cuda.is_available():
-                status["device"] = torch.cuda.get_device_name(0)
-                x = torch.randn(512, 512, device="cuda")
-                y = x @ x
-                status["gpu_test_mean"] = float(y.mean().item())
-        except Exception as e:
-            status["torch_error"] = str(e)
-
-        status["state"] = "done"
-        status["progress"] = 100
-        status["finished"] = datetime.now().isoformat(timespec="seconds")
-        status["message"] = "completed"
-        write_status(status_path, status)
+        sw.update(
+            state="done",
+            finished=datetime.now().isoformat(timespec="seconds"),
+            progress=100,
+            message="completed steps 1(record) + 2(audio).",
+            force=True,
+        )
 
     except Exception as e:
-        status["state"] = "failed"
-        status["error"] = str(e)
-        status["finished"] = datetime.now().isoformat(timespec="seconds")
-        write_status(status_path, status)
+        sw.update(
+            state="failed",
+            error=str(e),
+            finished=datetime.now().isoformat(timespec="seconds"),
+            message=f"failed: {e}",
+            force=True,
+        )
         raise
 
 
