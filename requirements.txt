@@ -1,0 +1,9 @@
+streamlit==1.52.2
+pytesseract
+opencv-python-headless
+pillow
+numpy
+ffmpeg-python
+torch==2.9.0+cu130
+torchvision==0.24.0+cu130
+torchaudio==2.9.0+cu130

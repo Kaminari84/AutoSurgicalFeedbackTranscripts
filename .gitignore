@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+
+# Conda / venv
+.conda/
+.venv/
+.env
+
+# Streamlit / app runtime artifacts
+.streamlit/
+_tmp/
+tmp/
+*.log
+
+# App data (don’t commit user data)
+uploads/
+audio/
+transcripts/
+jobs/
+*.csv
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mkv
+
+# OS/editor
+.DS_Store
+.vscode/
