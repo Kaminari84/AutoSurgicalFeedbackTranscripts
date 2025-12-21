@@ -407,21 +407,43 @@ else:
             st.caption("No status yet…")
             continue
 
-        # progress should be 0..100
+        # ----------------------------
+        # Overall progress (0..100)
+        # ----------------------------
         prog = int(s.get("progress", 0) or 0)
         prog = max(0, min(100, prog))
         st.progress(prog)
-        st.caption(f"{s.get('state')} — {s.get('message')}")
 
-        seg_i = s.get("segment_i")
-        seg_n = s.get("segment_n")
+        state = s.get("state", "unknown")
+        msg = s.get("message", "")
+        st.caption(f"{state} — {msg}")
+
+        # ----------------------------
+        # Stage sub-progress (0..100)
+        # ----------------------------
+        stage = s.get("stage")
         stage_p = s.get("stage_progress")
 
-        if seg_n:
-            if stage_p is not None:
-                st.progress(int(stage_p))
-            if seg_i is not None:
-                st.caption(f"Segments: {seg_i}/{seg_n}")
+        if stage and stage_p is not None:
+            stage_p = int(stage_p or 0)
+            stage_p = max(0, min(100, stage_p))
+            st.caption(f"Stage: {stage} — {stage_p}%")
+            st.progress(stage_p)
+
+        # ----------------------------
+        # Segment counter (for transcription)
+        # ----------------------------
+        seg_i = s.get("segment_i")
+        seg_n = s.get("segment_n")
+
+        if seg_n is not None:
+            try:
+                seg_n_i = int(seg_n)
+                seg_i_i = int(seg_i or 0)
+                if seg_n_i > 0:
+                    st.caption(f"Segments: {seg_i_i}/{seg_n_i}")
+            except Exception:
+                pass
 
         with st.expander("Details", expanded=False):
             st.json(s)
