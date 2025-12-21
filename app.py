@@ -73,15 +73,30 @@ def ocr_time_from_crop(crop_bgr: np.ndarray):
     return match, candidates, up  # return upscaled image for debug display
 
 
-def start_job(input_path: Path) -> Path:
+def start_job(input_path: Path, clock_start: str | None = None, clock_roi: tuple[int,int,int,int] | None = None) -> Path:
     job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     job_dir = JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     log_path = job_dir / "worker.log"
+
+    cmd = [
+        sys.executable,
+        str(APP_ROOT / "worker.py"),
+        "--input", str(input_path),
+        "--job-dir", str(job_dir),
+    ]
+
+    if clock_start:
+        cmd += ["--clock-start", clock_start]
+
+    if clock_roi:
+        # store as "l,t,r,b"
+        cmd += ["--clock-roi", ",".join(map(str, clock_roi))]
+
     with open(log_path, "w") as logf:
         subprocess.Popen(
-            [sys.executable, str(APP_ROOT / "worker.py"), "--input", str(input_path), "--job-dir", str(job_dir)],
+            cmd,
             stdout=logf,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -322,8 +337,15 @@ st.subheader("2) Process video (background job)")
 if selected is None:
     st.info("Choose or upload a video first.")
 else:
+    clock_start = st.session_state.get("first_clock_str")
+    clock_roi = st.session_state.get("clock_roi")
+
     if st.button("Start background job", type="primary"):
-        jd = start_job(selected)
+        jd = start_job(
+            selected,
+            clock_start=clock_start,
+            clock_roi=clock_roi,
+        )
         st.success(f"Started job: {jd.name}")
 
 st.subheader("Jobs (latest first)")
