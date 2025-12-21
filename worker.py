@@ -14,6 +14,9 @@ APP_ROOT = Path(__file__).resolve().parent
 AUDIO_ROOT = APP_ROOT / "audio"
 AUDIO_ROOT.mkdir(exist_ok=True)
 
+# diarization env + script
+DIAR_PYTHON = APP_ROOT / ".conda" / "diar" / "bin" / "python"
+DIARIZE_CLI = APP_ROOT / "diarize_cli.py"
 
 # -------------------------
 # Status utilities
@@ -96,92 +99,31 @@ def ffmpeg_denoise(in_wav: Path, out_wav: Path) -> None:
     run(cmd)
 
 
+
 # -------------------------
-# Torchaudio patch for pyannote import on torchaudio 2.9+
+# Diarization via subprocess (isolated env)
 # -------------------------
-def _patch_torchaudio_for_pyannote() -> None:
-    """
-    pyannote.audio (3.x) imports torchaudio and calls APIs that were removed/deprecated
-    around torchaudio 2.9 (e.g., list_audio_backends, AudioMetaData in some builds).
+def diarize_via_cli(audio_path: Path, out_csv: Path, *, min_speakers: int = 2) -> None:
+    if not DIAR_PYTHON.exists():
+        raise RuntimeError(f"Missing diarization python: {DIAR_PYTHON}")
+    if not DIARIZE_CLI.exists():
+        raise RuntimeError(f"Missing diarization script: {DIARIZE_CLI}")
 
-    This patch defines minimal shims so pyannote can import and use soundfile-based info.
-    """
-    import torchaudio  # must exist
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    # list_audio_backends / get_audio_backend / set_audio_backend
-    if not hasattr(torchaudio, "list_audio_backends"):
-        torchaudio.list_audio_backends = lambda: ["soundfile"]  # type: ignore[attr-defined]
-    if not hasattr(torchaudio, "get_audio_backend"):
-        torchaudio.get_audio_backend = lambda: "soundfile"  # type: ignore[attr-defined]
-    if not hasattr(torchaudio, "set_audio_backend"):
-        torchaudio.set_audio_backend = lambda backend=None: None  # type: ignore[attr-defined]
+    cmd = [
+        str(DIAR_PYTHON),
+        str(DIARIZE_CLI),
+        "--audio", str(audio_path),
+        "--out-csv", str(out_csv),
+        "--min-speakers", str(int(min_speakers)),
+    ]
 
-    # AudioMetaData
-    if not hasattr(torchaudio, "AudioMetaData"):
-        @dataclass
-        class AudioMetaData:  # minimal fields commonly used
-            sample_rate: int
-            num_frames: int
-            num_channels: int
-            bits_per_sample: int = 16
-            encoding: str = "PCM_S"
+    # inherit env so HF_TOKEN is visible
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
 
-        torchaudio.AudioMetaData = AudioMetaData  # type: ignore[attr-defined]
-
-    # torchaudio.info (soundfile-backed)
-    if not hasattr(torchaudio, "info"):
-        import soundfile as sf
-
-        def _info(path: str):
-            f = sf.SoundFile(path)
-            return torchaudio.AudioMetaData(  # type: ignore[attr-defined]
-                sample_rate=int(f.samplerate),
-                num_frames=int(len(f)),
-                num_channels=int(f.channels),
-                bits_per_sample=16,
-                encoding="PCM_S",
-            )
-
-        torchaudio.info = _info  # type: ignore[attr-defined]
-
-
-def diarize_pyannote(audio_path: Path, *, hf_token: str, min_speakers: int = 2) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    _patch_torchaudio_for_pyannote()
-
-    import torch
-    from pyannote.audio import Pipeline
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    pipe = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
-    )
-    # If moving to CUDA fails in your env, fall back to CPU.
-    try:
-        pipe.to(device)
-    except Exception:
-        device = torch.device("cpu")
-
-    ann = pipe(str(audio_path), min_speakers=min_speakers)
-
-    rows: list[dict[str, Any]] = []
-    for segment, _, speaker in ann.itertracks(yield_label=True):
-        s = float(segment.start)
-        e = float(segment.end)
-        if e > s:
-            rows.append({"start": s, "end": e, "speaker": str(speaker)})
-
-    rows.sort(key=lambda r: (r["start"], r["end"]))
-
-    meta = {
-        "pipeline": "pyannote/speaker-diarization-3.1",
-        "device": str(device),
-        "min_speakers": int(min_speakers),
-        "num_segments": len(rows),
-    }
-    return rows, meta
-
+    subprocess.check_call(cmd, env=env)
 
 def main():
     ap = argparse.ArgumentParser()
@@ -213,7 +155,6 @@ def main():
         "denoised_audio_path": None,
         "segments_csv": None,
         "num_segments": None,
-        "diarization_meta": None,
         "error": None,
         "finished": None,
     }
@@ -237,27 +178,29 @@ def main():
         sw.update(stage="audio", stage_progress=100, message="audio ready", progress=25, denoised_audio_path=str(den_wav), force=True)
 
         # -------------------------
-        # Step 3: Speaker diarization
+        # Step 3: Speaker diarization (runs in .conda/diar)
         # -------------------------
-        hf_token = os.getenv("HF_TOKEN")
-        if not hf_token:
-            raise RuntimeError("HF_TOKEN is not set in the worker environment.")
-
-        sw.update(stage="diarization", stage_progress=0, message="speaker diarization (pyannote)", progress=30, force=True)
-
-        segments, diar_meta = diarize_pyannote(den_wav, hf_token=hf_token, min_speakers=2)
+        if not os.getenv("HF_TOKEN"):
+            raise RuntimeError("HF_TOKEN is not set in the Streamlit/worker environment.")
 
         seg_csv = job_dir / "segments.csv"
-        pd.DataFrame(segments).to_csv(seg_csv, index=False)
+        sw.update(stage="diarization", stage_progress=0, message="speaker diarization (pyannote)", progress=30, force=True)
+
+        diarize_via_cli(den_wav, seg_csv, min_speakers=2)
+
+        if not seg_csv.exists():
+            raise RuntimeError(f"Diarization finished but output CSV not found: {seg_csv}")
+
+        df = pd.read_csv(seg_csv)
+        n = int(len(df))
 
         sw.update(
             stage="diarization",
             stage_progress=100,
-            message=f"diarization done ({len(segments)} segments)",
+            message=f"diarization done ({n} segments)",
             progress=60,
             segments_csv=str(seg_csv),
-            num_segments=len(segments),
-            diarization_meta=diar_meta,
+            num_segments=n,
             force=True,
         )
 
