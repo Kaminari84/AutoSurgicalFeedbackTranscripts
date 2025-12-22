@@ -15,6 +15,47 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 
+def pick_device(requested: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """
+    Prefer CUDA by default, but only if it is actually usable.
+    Returns (device, note). note is a human-readable warning if we had to fall back.
+    """
+    req = (requested or "auto").strip().lower()
+
+    import torch
+
+    def cuda_probe() -> None:
+        # Minimal op to confirm kernels actually work on this GPU
+        x = torch.randn((256, 256), device="cuda")
+        y = x @ x
+        _ = float(y.mean().item())
+
+    if req not in {"auto", "cuda", "cpu"}:
+        return "cpu", f"unknown --device={requested!r}; using cpu"
+
+    if req == "cpu":
+        return "cpu", None
+
+    # req is "cuda" or "auto"
+    if torch.version.cuda is None:
+        if req == "cuda":
+            return "cpu", "CUDA requested but this torch build has torch.version.cuda=None (CPU-only build)"
+        return "cpu", "torch is CPU-only (torch.version.cuda=None)"
+
+    if not torch.cuda.is_available():
+        if req == "cuda":
+            return "cpu", "CUDA requested but torch.cuda.is_available() is False"
+        return "cpu", "torch.cuda.is_available() is False"
+
+    try:
+        cuda_probe()
+        return "cuda", None
+    except Exception as e:
+        # CUDA exists but isn't usable (common w/ capability mismatch, missing kernels, bad driver pairing, etc.)
+        if req == "cuda":
+            return "cpu", f"CUDA requested but probe failed: {e}"
+        return "cpu", f"CUDA probe failed; falling back to CPU: {e}"
+
 
 # -------------------------
 # JSON status utilities
@@ -308,7 +349,7 @@ def main():
     ap.add_argument("--model", default="openai/whisper-large-v3")
     ap.add_argument("--language", default="en")
     ap.add_argument("--task", default="transcribe")
-    ap.add_argument("--device", default=None, help="cuda | cpu | auto (default)")
+    ap.add_argument("--device", default="auto", help="auto|cuda|cpu (default: auto, prefers cuda)")
     ap.add_argument("--min-seg-sec", type=float, default=0.15)
     args = ap.parse_args()
 
@@ -318,9 +359,9 @@ def main():
     out_sent = Path(args.out_sentences_csv) if args.out_sentences_csv else out_csv.with_name(out_csv.stem + "_sentences.csv")
     status_path = Path(args.status_json) if args.status_json else out_csv.with_suffix(".status.json")
 
-    import torch  # only to detect cuda availability
+    import torch  # still fine to import here
 
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    device, device_note = pick_device(args.device)
 
     status = {
         "state": "running",
@@ -335,6 +376,10 @@ def main():
         "out_sentences_csv": str(out_sent),
         "model": args.model,
         "device": device,
+        "device_note": device_note,
+        "torch_version": getattr(torch, "__version__", None),
+        "torch_cuda": getattr(torch.version, "cuda", None),
+        "cuda_available": bool(torch.cuda.is_available()),
         "segment_i": 0,
         "segment_n": None,
         "audio_duration_sec": None,
@@ -344,6 +389,7 @@ def main():
     }
     sw = StatusWriter(status_path, status, every_sec=0.5)
     sw.update(force=True)
+    sw.update(message=f"starting transcription on {device}" + (f" ({device_note})" if device_note else ""), force=True)
 
     try:
         sw.update(stage="load_audio", progress=1, message="loading audio", force=True)

@@ -303,9 +303,9 @@ else:
     col1, col2 = st.columns(2)
     with col1:
         st.write("ROI:", roi)
-        st.image(crop_rgb, caption="Crop used for OCR", use_container_width=True)
+        st.image(crop_rgb, caption="Crop used for OCR", width='content')
     with col2:
-        st.image(cv2.cvtColor(up_dbg, cv2.COLOR_BGR2RGB), caption="Upscaled for OCR (debug)", use_container_width=True)
+        st.image(cv2.cvtColor(up_dbg, cv2.COLOR_BGR2RGB), caption="Upscaled for OCR (debug)", width='content')
         st.write("OCR candidates:")
         for i, t in enumerate(candidates, 1):
             st.code(f"[{i}] {repr(t)}")
@@ -436,6 +436,18 @@ else:
 
         if s.get("diarization_log"):
             st.caption(f"Diarization log: {s['diarization_log']}")
+
+        if s.get("transcription_log"):
+            st.caption(f"Transcription log: {s['transcription_log']}")
+
+        if s.get("segments_csv"):
+            st.caption(f"Segments CSV: {s['segments_csv']}")
+
+        if s.get("transcript_segments_csv"):
+            st.caption(f"Transcript (segments): {s['transcript_segments_csv']}")
+
+        if s.get("transcript_sentences_csv"):
+            st.caption(f"Transcript (sentences): {s['transcript_sentences_csv']}")
 
         # ----------------------------
         # Stage sub-progress (0..100)

@@ -18,6 +18,11 @@ AUDIO_ROOT.mkdir(exist_ok=True)
 DIAR_PYTHON = APP_ROOT / ".conda" / "diar" / "bin" / "python"
 DIARIZE_CLI = APP_ROOT / "diarize_cli.py"
 
+# ASR env + script
+ASR_PYTHON = APP_ROOT / ".conda" / "asr" / "bin" / "python"
+TRANSCRIBE_CLI = APP_ROOT / "transcribe_cli.py"
+ASR_DEVICE = os.getenv("ASR_DEVICE", "auto")  # auto|cuda|cpu
+
 # -------------------------
 # Status utilities
 # -------------------------
@@ -111,6 +116,9 @@ def _read_json(path: Path) -> dict | None:
     except Exception:
         return None
 
+def _require_file(path: Path, label: str) -> None:
+    if not path.exists():
+        raise RuntimeError(f"Missing {label}: {path}")
 
 def diarize_via_cli_with_progress(audio_path: Path, out_csv: Path, job_dir: Path, sw: StatusWriter, *, min_speakers: int = 2) -> None:
     diar_status = job_dir / "diarization_status.json"
@@ -174,6 +182,120 @@ def diarize_via_cli_with_progress(audio_path: Path, out_csv: Path, job_dir: Path
                 err = last_seen["error"]
             raise RuntimeError(f"diarize_cli failed (rc={rc}). {err or 'See diarize_cli.log for details.'}")
 
+# -------------------------
+# Transcription via subprocess (isolated env)
+# -------------------------
+def transcribe_via_cli_with_progress(
+    audio_path: Path,
+    segments_csv: Path,
+    out_seg_csv: Path,
+    out_sent_csv: Path,
+    job_dir: Path,
+    sw: StatusWriter,
+    *,
+    model: str = "openai/whisper-large-v3",
+    language: str = "en",
+    task: str = "transcribe",
+    device: Optional[str] = None,
+) -> None:
+    tr_status = job_dir / "transcription_status.json"
+    tr_log = job_dir / "transcribe_cli.log"
+
+    _require_file(ASR_PYTHON, "ASR_PYTHON")
+    _require_file(TRANSCRIBE_CLI, "TRANSCRIBE_CLI")
+    _require_file(segments_csv, "segments.csv")
+
+    out_seg_csv.parent.mkdir(parents=True, exist_ok=True)
+    out_sent_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    # Default to CPU unless you explicitly override (safer on GB10 until CUDA arch support is nailed).
+    # Set ASR_DEVICE=cuda (or cpu) in your environment if you want to force.
+    if device is None:
+        device = os.getenv("ASR_DEVICE", "cpu")
+
+    cmd = [
+        str(ASR_PYTHON),
+        "-u",
+        str(TRANSCRIBE_CLI),
+        "--audio", str(audio_path),
+        "--segments", str(segments_csv),
+        "--out-csv", str(out_seg_csv),
+        "--out-sentences-csv", str(out_sent_csv),
+        "--status-json", str(tr_status),
+        "--model", model,
+        "--language", language,
+        "--task", task,
+        "--device", ASR_DEVICE,
+    ]
+
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    sw.update(
+        stage="transcription",
+        stage_progress=0,
+        message="starting transcription",
+        progress=60,
+        force=True,
+        transcription_status_path=str(tr_status),
+        transcription_log=str(tr_log),
+        transcript_segments_csv=str(out_seg_csv),
+        transcript_sentences_csv=str(out_sent_csv),
+        segment_i=0,
+        segment_n=None,
+    )
+
+    with open(tr_log, "w") as logf:
+        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, env=env)
+
+        last_seen = None
+        while True:
+            rc = proc.poll()
+            js = _read_json(tr_status)
+
+            if js:
+                last_seen = js
+                p = int(js.get("progress", 0) or 0)
+                p = max(0, min(100, p))
+                msg = js.get("message") or "transcribing…"
+
+                seg_i = js.get("segment_i")
+                seg_n = js.get("segment_n")
+
+                # overall worker progress: 60..95
+                overall = 60 + int((p / 100.0) * 35)
+
+                sw.update(
+                    stage="transcription",
+                    stage_progress=p,
+                    message=f"transcription: {msg}",
+                    progress=overall,
+                    segment_i=seg_i,
+                    segment_n=seg_n,
+                )
+            else:
+                sw.update(
+                    stage="transcription",
+                    stage_progress=0,
+                    message="transcribing… (waiting for transcription_status.json)",
+                    progress=61,
+                )
+
+            if rc is not None:
+                break
+            time.sleep(0.5)
+
+        if rc != 0:
+            err = None
+            if last_seen and last_seen.get("error"):
+                err = last_seen["error"]
+            raise RuntimeError(f"transcribe_cli failed (rc={rc}). {err or 'See transcribe_cli.log'}")
+
+    if not out_seg_csv.exists():
+        raise RuntimeError(f"transcribe_cli finished but did not create: {out_seg_csv}")
+    if not out_sent_csv.exists():
+        raise RuntimeError(f"transcribe_cli finished but did not create: {out_sent_csv}")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -196,14 +318,29 @@ def main():
         "stage": None,
         "stage_progress": 0,
         "message": "starting",
+
         # carry-through from app.py
         "clock_start": args.clock_start,
         "clock_roi": args.clock_roi,
+
         # outputs
         "raw_audio_path": None,
         "denoised_audio_path": None,
         "segments_csv": None,
         "num_segments": None,
+        "transcript_segments_csv": None,
+        "transcript_sentences_csv": None,
+
+        # logs/statuses
+        "diarization_status_path": None,
+        "diarization_log": None,
+        "transcription_status_path": None,
+        "transcription_log": None,
+
+        # counters (for GUI)
+        "segment_i": None,
+        "segment_n": None,
+
         "error": None,
         "finished": None,
     }
@@ -250,6 +387,38 @@ def main():
             progress=60,
             segments_csv=str(seg_csv),
             num_segments=n,
+            force=True,
+        )
+
+        # -------------------------
+        # Step 4: Transcription (ASR)
+        # -------------------------
+        out_seg_csv = job_dir / "transcript_segments.csv"
+        out_sent_csv = job_dir / "transcript_sentences.csv"
+
+        sw.update(stage="transcription", stage_progress=0, message="starting ASR", progress=60, force=True)
+
+        transcribe_via_cli_with_progress(
+            den_wav,
+            seg_csv,
+            out_seg_csv,
+            out_sent_csv,
+            job_dir,
+            sw,
+            model=os.getenv("ASR_MODEL", "openai/whisper-large-v3"),
+            language=os.getenv("ASR_LANG", "en"),
+            task=os.getenv("ASR_TASK", "transcribe"),
+            device=None,
+        )
+
+        # finalize transcription stage
+        sw.update(
+            stage="transcription",
+            stage_progress=100,
+            message="transcription done",
+            progress=95,
+            transcript_segments_csv=str(out_seg_csv),
+            transcript_sentences_csv=str(out_sent_csv),
             force=True,
         )
 
