@@ -434,12 +434,22 @@ if not job_dirs:
     st.info("No jobs to show (toggle 'Show completed jobs' in the sidebar to see finished ones).")
 else:
     for jd in job_dirs:
-        st.write(f"**{jd.name}**")
         s = read_status_safe(jd)
 
         if not s:
             st.caption("No status yet…")
             continue
+        
+        # Display name: show input filename if available, otherwise fall back to job id
+        display_name = jd.name
+        if s and s.get("input"):
+            try:
+                display_name = Path(s["input"]).name
+            except Exception:
+                display_name = str(s["input"])
+
+        st.write(f"Processing: **{display_name}**")
+        st.caption(f"Job: {jd.name}")
 
         # ----------------------------
         # Overall progress (0..100)
