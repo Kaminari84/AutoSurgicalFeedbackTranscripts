@@ -74,7 +74,6 @@ def ocr_time_from_crop(crop_bgr: np.ndarray):
 
     return match, candidates, up  # return upscaled image for debug display
 
-
 def start_job(input_path: Path, clock_start: str | None = None, clock_roi: tuple[int,int,int,int] | None = None) -> Path:
     job_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     job_dir = JOBS_DIR / job_id
@@ -110,6 +109,25 @@ def read_status(job_dir: Path):
     if not p.exists():
         return None
     return json.loads(p.read_text())
+
+def job_started_ts(jd: Path) -> float:
+    s = read_status_safe(jd)
+    if s and s.get("started"):
+        try:
+            return datetime.fromisoformat(s["started"]).timestamp()
+        except Exception:
+            pass
+
+    # fallback: parse "YYYYMMDD_HHMMSS_xxxxxxxx"
+    try:
+        parts = jd.name.split("_")
+        if len(parts) >= 2:
+            return datetime.strptime(f"{parts[0]}_{parts[1]}", "%Y%m%d_%H%M%S").timestamp()
+    except Exception:
+        pass
+
+    # last resort (may flip for running jobs)
+    return jd.stat().st_mtime
 
 def ffprobe_metadata(path: str) -> dict:
     """
@@ -385,10 +403,10 @@ if do_cleanup:
             deleted += 1
     st.success(f"Deleted {deleted} completed job(s).")
 
-# Sort by modification time (more accurate than reverse name)
+# Sort by job start time from internal status json
 job_dirs = sorted(
     [p for p in JOBS_DIR.glob("*") if p.is_dir()],
-    key=lambda p: p.stat().st_mtime,
+    key=job_started_ts,
     reverse=True
 )
 
