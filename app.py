@@ -37,6 +37,65 @@ TMP_DIR.mkdir(exist_ok=True)
 
 _TIME_RE = re.compile(r'\b([01]?\d|2[0-3]):[0-5]\d:[0-5]\d\b')
 
+# ----------------------------
+# Download helpers
+# ----------------------------
+MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024  # 200MB safety limit (adjust)
+
+def _human_bytes(n: int) -> str:
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+def _resolve_job_path(path_str: str | None) -> Path | None:
+    """
+    Resolve paths coming from status.json:
+    - absolute paths are used as-is
+    - relative paths are assumed relative to APP_ROOT
+    """
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = APP_ROOT / p
+    return p
+
+def download_row(label: str, path_str: str | None, *, key: str) -> None:
+    p = _resolve_job_path(path_str)
+    if p is None:
+        return
+
+    if not p.exists():
+        st.caption(f"{label}: {path_str} (missing)")
+        return
+
+    size = p.stat().st_size
+    try:
+        shown = str(p.relative_to(APP_ROOT))
+    except Exception:
+        shown = str(p)
+
+    c1, c2 = st.columns([8, 2])
+    with c1:
+        st.caption(f"{label}: `{shown}` ({_human_bytes(size)})")
+
+    with c2:
+        if size > MAX_DOWNLOAD_BYTES:
+            st.caption("Too large (use rsync)")
+            return
+
+        # IMPORTANT: download_button will read from this file handle
+        with open(p, "rb") as f:
+            st.download_button(
+                label="Download",
+                data=f,
+                file_name=p.name,
+                key=key,
+            )
+
+
 def extract_first_frame_ffmpeg(video_path: Path, out_png: Path, t_sec: float = 0.0):
     # -ss before -i is fast; output a single PNG frame
     subprocess.check_call([
@@ -179,7 +238,7 @@ def ffprobe_metadata(path: str) -> dict:
 
 st.set_page_config(page_title="TestWebApp", layout="wide")
 
-st.title("TestWebApp on DGX Spark")
+st.title("Auto Transcription of Surgical Feedback")
 st.caption(f"Time: {datetime.now().isoformat(timespec='seconds')} | Host: {socket.gethostname()}")
 
 with st.sidebar:
@@ -226,50 +285,50 @@ with tab2:
         st.write("Size (MB):", round(out_path.stat().st_size / (1024**2), 2))
         selected = out_path
 
-st.subheader("Selected file metadata")
+# st.subheader("Selected file metadata")
 
-if selected is None:
-    st.info("Choose or upload a video first to see metadata.")
-else:
-    try:
-        meta = ffprobe_metadata(str(selected))
-        st.json(meta)
-    except FileNotFoundError:
-        st.error("ffprobe not found. Install with: conda install -c conda-forge ffmpeg -y")
-    except subprocess.CalledProcessError as e:
-        st.error(f"ffprobe failed: {e}")
+# if selected is None:
+#     st.info("Choose or upload a video first to see metadata.")
+# else:
+#     try:
+#         meta = ffprobe_metadata(str(selected))
+#         st.json(meta)
+#     except FileNotFoundError:
+#         st.error("ffprobe not found. Install with: conda install -c conda-forge ffmpeg -y")
+#     except subprocess.CalledProcessError as e:
+#         st.error(f"ffprobe failed: {e}")
 
-st.subheader("Torch / CUDA diagnostics")
+# st.subheader("Torch / CUDA diagnostics")
 
-with st.expander("Open diagnostics", expanded=False):
-    try:
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            import torch
+# with st.expander("Open diagnostics", expanded=False):
+#     try:
+#         with warnings.catch_warnings(record=True) as w:
+#             warnings.simplefilter("always")
+#             import torch
 
-            st.write("torch:", torch.__version__)
-            st.write("torch.version.cuda:", torch.version.cuda)
-            st.write("cuda available:", torch.cuda.is_available())
+#             st.write("torch:", torch.__version__)
+#             st.write("torch.version.cuda:", torch.version.cuda)
+#             st.write("cuda available:", torch.cuda.is_available())
 
-            if torch.cuda.is_available():
-                st.write("device:", torch.cuda.get_device_name(0))
-                st.write("capability:", torch.cuda.get_device_capability(0))
+#             if torch.cuda.is_available():
+#                 st.write("device:", torch.cuda.get_device_name(0))
+#                 st.write("capability:", torch.cuda.get_device_capability(0))
 
-                x = torch.randn(512, 512, device="cuda")
-                y = x @ x
-                st.write("GPU matmul mean:", float(y.mean().item()))
+#                 x = torch.randn(512, 512, device="cuda")
+#                 y = x @ x
+#                 st.write("GPU matmul mean:", float(y.mean().item()))
 
-            # show warnings (including the GB10 capability message) in the UI
-            if w:
-                st.warning("Warnings were raised during import/init:")
-                for ww in w:
-                    st.code(str(ww.message))
-    except Exception as e:
-        st.error(f"PyTorch not ready: {e}")
+#             # show warnings (including the GB10 capability message) in the UI
+#             if w:
+#                 st.warning("Warnings were raised during import/init:")
+#                 for ww in w:
+#                     st.code(str(ww.message))
+#     except Exception as e:
+#         st.error(f"PyTorch not ready: {e}")
 
 ## OCR PROCESS ##
 
-st.subheader("Clock OCR (Step 1)")
+st.subheader("2) Clock OCR (Real-time from Video)")
 
 if selected is None:
     st.info("Choose a video first.")
@@ -322,11 +381,6 @@ else:
     with col1:
         st.write("ROI:", roi)
         st.image(crop_rgb, caption="Crop used for OCR", width='content')
-    with col2:
-        st.image(cv2.cvtColor(up_dbg, cv2.COLOR_BGR2RGB), caption="Upscaled for OCR (debug)", width='content')
-        st.write("OCR candidates:")
-        for i, t in enumerate(candidates, 1):
-            st.code(f"[{i}] {repr(t)}")
 
     if detected:
         st.success(f"Detected time: {detected}")
@@ -369,8 +423,6 @@ else:
 
 ## List the jobs ##
 st.subheader("Jobs (latest first)")
-show_completed = st.checkbox("Show completed jobs", value=False)
-
 
 def read_status_safe(job_dir: Path):
     p = job_dir / "status.json"
@@ -396,7 +448,7 @@ if do_cleanup:
         s = read_status_safe(jd)
         if not s:
             continue
-        if (not show_completed) and s.get("state") == "done":
+        if s.get("state") == "done":
             continue
         if is_completed(s) and jd.stat().st_mtime < cutoff:
             shutil.rmtree(jd, ignore_errors=True)
@@ -430,85 +482,86 @@ if not show_completed_jobs:
 
 job_dirs = job_dirs[: int(max_jobs_to_show)]
 
+# ... keep everything above the loop the same ...
+
 if not job_dirs:
     st.info("No jobs to show (toggle 'Show completed jobs' in the sidebar to see finished ones).")
 else:
-    for jd in job_dirs:
+    for j_num, jd in enumerate(job_dirs, start=1):
         s = read_status_safe(jd)
-
         if not s:
             st.caption("No status yet…")
             continue
-        
-        # Display name: show input filename if available, otherwise fall back to job id
+
+        # Display name: input filename if available, otherwise job id
         display_name = jd.name
-        if s and s.get("input"):
+        if s.get("input"):
             try:
                 display_name = Path(s["input"]).name
             except Exception:
                 display_name = str(s["input"])
 
-        st.write(f"Processing: **{display_name}**")
-        st.caption(f"Job: {jd.name}")
-
-        # ----------------------------
-        # Overall progress (0..100)
-        # ----------------------------
-        prog = int(s.get("progress", 0) or 0)
-        prog = max(0, min(100, prog))
-        st.progress(prog)
-
+        done = is_completed(s)
         state = s.get("state", "unknown")
         msg = s.get("message", "")
-        st.caption(f"{state} — {msg}")
 
-        if s.get("diarization_log"):
-            st.caption(f"Diarization log: {s['diarization_log']}")
+        # ---- Visual grouping (card if supported, else divider) ----
+        try:
+            box = st.container(border=True)
+        except TypeError:
+            box = st.container()
 
-        if s.get("transcription_log"):
-            st.caption(f"Transcription log: {s['transcription_log']}")
+        with box:
+            # Header
+            header_cols = st.columns([0.8, 0.2])
+            with header_cols[0]:
+                st.write(f"{j_num}) Video: **{display_name}**")
+                st.caption(f"Job: {jd.name}")
+            with header_cols[1]:
+                # compact state badge-like text
+                st.caption(f"**{state}**")
 
-        if s.get("segments_csv"):
-            st.caption(f"Segments CSV: {s['segments_csv']}")
+            # Always show files (download area)
+            with st.expander("Files", expanded=False):
+                download_row("Raw audio", s.get("raw_audio_path"), key=f"dl-{jd.name}-rawwav")
+                download_row("Denoised audio", s.get("denoised_audio_path"), key=f"dl-{jd.name}-denwav")
+                download_row("Transcript (sentences)", s.get("transcript_sentences_csv"), key=f"dl-{jd.name}-trsent")
 
-        if s.get("transcript_segments_csv"):
-            st.caption(f"Transcript (segments): {s['transcript_segments_csv']}")
+            # ---- Only show progress/status UI if NOT completed ----
+            if not done:
+                prog = int(s.get("progress", 0) or 0)
+                prog = max(0, min(100, prog))
+                st.progress(prog)
+                st.caption(f"{state} — {msg}")
 
-        if s.get("transcript_sentences_csv"):
-            st.caption(f"Transcript (sentences): {s['transcript_sentences_csv']}")
+                # Stage sub-progress (0..100)
+                stage = s.get("stage")
+                stage_p = s.get("stage_progress")
+                if stage and stage_p is not None:
+                    stage_p = int(stage_p or 0)
+                    stage_p = max(0, min(100, stage_p))
+                    st.caption(f"Stage: {stage} — {stage_p}%")
+                    st.progress(stage_p)
 
-        # ----------------------------
-        # Stage sub-progress (0..100)
-        # ----------------------------
-        stage = s.get("stage")
-        stage_p = s.get("stage_progress")
+                # Segment counter (for transcription)
+                seg_i = s.get("segment_i")
+                seg_n = s.get("segment_n")
+                if seg_n is not None:
+                    try:
+                        seg_n_i = int(seg_n)
+                        seg_i_i = int(seg_i or 0)
+                        if seg_n_i > 0:
+                            st.caption(f"Segments: {seg_i_i}/{seg_n_i}")
+                    except Exception:
+                        pass
+            else:
+                # For completed jobs: keep it minimal
+                # (optional) show the finished timestamp in a subtle way
+                if s.get("finished"):
+                    st.caption(f"Finished: {s['finished']}")
 
-        if stage and stage_p is not None:
-            stage_p = int(stage_p or 0)
-            stage_p = max(0, min(100, stage_p))
-            st.caption(f"Stage: {stage} — {stage_p}%")
-            st.progress(stage_p)
-
-        # ----------------------------
-        # Segment counter (for transcription)
-        # ----------------------------
-        seg_i = s.get("segment_i")
-        seg_n = s.get("segment_n")
-
-        if seg_n is not None:
-            try:
-                seg_n_i = int(seg_n)
-                seg_i_i = int(seg_i or 0)
-                if seg_n_i > 0:
-                    st.caption(f"Segments: {seg_i_i}/{seg_n_i}")
-            except Exception:
-                pass
-
-        with st.expander("Details", expanded=False):
-            st.json(s)
-            lp = jd / "worker.log"
-            if lp.exists():
-                st.code(lp.read_text()[-4000:])
+        # Separator between jobs (helps even with borders)
+        #st.divider()
 
 
 if selected is None:
