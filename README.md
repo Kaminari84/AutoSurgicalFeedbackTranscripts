@@ -23,12 +23,14 @@ Given a video file, the app:
 The Streamlit UI lists jobs, shows progress for running jobs, and provides download buttons for artifacts.
 
 ## Repo structure
-- .
-- ├── app.py                # Streamlit UI
-- ├── worker.py             # Background pipeline runner
-- ├── diarize_cli.py        # Diarization subprocess (pyannote)
-- ├── transcribe_cli.py     # Transcription subprocess (Whisper)
-- ├── uploads/              # Drop videos here (server-side)
-- ├── jobs/                 # Per-job outputs + status.json
-- ├── audio/                # Per-job audio artifacts
-- └── _tmp/                 # Cached first frames for OCR
+```
+.
+├── app.py                # Streamlit UI
+├── worker.py             # Background pipeline runner
+├── diarize_cli.py        # Diarization subprocess (pyannote)
+├── transcribe_cli.py     # Transcription subprocess (Whisper)
+├── uploads/              # Drop videos here (server-side)
+├── jobs/                 # Per-job outputs + status.json
+├── audio/                # Per-job audio artifacts
+└── _tmp/                 # Cached first frames for OCR
+```
