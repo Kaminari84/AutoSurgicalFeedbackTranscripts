@@ -1,0 +1,21 @@
+name: autosurg-asr
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - soundfile
+  - scipy
+  - pytorch
+  - torchaudio
+  - pytorch-cuda=12.1
+  - pip:
+      - transformers>=4.40
+      - accelerate
+      - safetensors
+      - sentencepiece
+      - tqdm

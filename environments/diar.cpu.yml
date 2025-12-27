@@ -1,0 +1,14 @@
+name: autosurg-diar
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pandas
+  - soundfile
+  - pytorch
+  - torchaudio
+  - cpuonly
+  - pip:
+      - pyannote.audio>=3.1
