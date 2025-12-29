@@ -171,6 +171,40 @@ def estimate_noise_floor_rms(mono: np.ndarray, sr: int) -> float:
     rms = np.sqrt(np.mean(x * x, axis=1) + 1e-12)
     return float(np.quantile(rms, 0.10))
 
+# -------------------------
+# Colab-style derived metrics
+# -------------------------
+def compute_signal_to_noise_ratio(snr_db: float | None) -> float | None:
+    """Colab used: df['signal_to_noise_ratio'] = df['snr_db'].round(2)."""
+    if snr_db is None:
+        return None
+    try:
+        return float(round(float(snr_db), 2))
+    except Exception:
+        return None
+
+def compute_transcription_confidence_score(
+    avg_logprob: float | None,
+    avg_entropy: float | None,
+    *,
+    entropy_max: float = 8.0,
+) -> float | None:
+    """
+    Colab-style:
+      transcription_confidence_score = exp(asr_avg_logprob) * (1 - clip(asr_avg_entropy/8, 0, 1))
+    """
+    if avg_logprob is None or avg_entropy is None:
+        return None
+    try:
+        lp = float(avg_logprob)
+        ent = float(avg_entropy)
+    except Exception:
+        return None
+
+    ent_norm = float(np.clip(ent / float(entropy_max), 0.0, 1.0))
+    score = float(np.exp(lp) * (1.0 - ent_norm))
+    return score
+
 
 # -------------------------
 # Whisper (Transformers) transcription
@@ -351,6 +385,7 @@ def main():
     ap.add_argument("--task", default="transcribe")
     ap.add_argument("--device", default="auto", help="auto|cuda|cpu (default: auto, prefers cuda)")
     ap.add_argument("--min-seg-sec", type=float, default=0.15)
+    ap.add_argument("--entropy-max", type=float, default=8.0, help="normalizer for confidence score (default: 8.0)")
     args = ap.parse_args()
 
     audio_path = Path(args.audio)
@@ -422,16 +457,21 @@ def main():
 
             # skip tiny segments
             if end - start < args.min_seg_sec:
+                snr_db = float("-inf")
+                sig_noise = compute_signal_to_noise_ratio(snr_db)
+                conf = None
                 r = {
                     "seg_idx": i,
                     "speaker": speaker,
                     "start": start,
                     "end": end,
                     "audio_mag": 0.0,
-                    "snr_db": float("-inf"),
+                    "snr_db": snr_db,
+                    "signal_to_noise_ratio": sig_noise,
                     "transcription": "",
                     "asr_avg_logprob": None,
                     "asr_avg_entropy": None,
+                    "transcription_confidence_score": conf,
                 }
                 rows.append(r)
                 continue
@@ -448,6 +488,11 @@ def main():
                 processor, model, dev,
             )
             text = (tr.get("text") or "").strip()
+            avg_lp = tr.get("avg_logprob", None)
+            avg_ent = tr.get("avg_entropy", None)
+
+            sig_noise = compute_signal_to_noise_ratio(snr_db)
+            conf = compute_transcription_confidence_score(avg_lp, avg_ent, entropy_max=float(args.entropy_max))
 
             r = {
                 "seg_idx": i,
@@ -456,9 +501,11 @@ def main():
                 "end": end,
                 "audio_mag": rms,
                 "snr_db": snr_db,
+                "signal_to_noise_ratio": sig_noise,
                 "transcription": text,
-                "asr_avg_logprob": tr.get("avg_logprob", None),
-                "asr_avg_entropy": tr.get("avg_entropy", None),
+                "asr_avg_logprob": avg_lp,
+                "asr_avg_entropy": avg_ent,
+                "transcription_confidence_score": conf,
             }
             rows.append(r)
 
@@ -472,6 +519,9 @@ def main():
                     "start": float(sp["start"]),
                     "end": float(sp["end"]),
                     "sentence": sp["sentence"],
+                    # propagate per-segment metrics to each sentence row (Colab-style)
+                    "signal_to_noise_ratio": sig_noise,
+                    "transcription_confidence_score": conf,
                 })
 
             # progress update
