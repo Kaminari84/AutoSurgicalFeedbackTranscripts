@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,6 +16,35 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 
+
+_HMS_ONLY_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+
+def parse_clock_start_to_sec(clock_start: str | None) -> int | None:
+    """Parse HH:MM:SS into seconds since midnight. Returns None if invalid."""
+    if not clock_start:
+        return None
+    s = clock_start.strip()
+    if not _HMS_ONLY_RE.match(s):
+        return None
+    try:
+        h, m, ss = s.split(":")
+        return int(h) * 3600 + int(m) * 60 + int(ss)
+    except Exception:
+        return None
+
+def wall_clock_from_offset(base_clock_sec: int, offset_sec: float) -> tuple[str, int]:
+    """
+    base_clock_sec: seconds since midnight at t=0 (from OCR)
+    offset_sec: seconds since video start (float)
+    Returns (HH:MM:SS modulo 24h, day_offset int).
+    """
+    tot = float(base_clock_sec) + max(0.0, float(offset_sec))
+    day_offset = int(tot // 86400.0)
+    mod = int(tot % 86400.0)  # drop sub-second for display to match overlay
+    h = mod // 3600
+    m = (mod % 3600) // 60
+    s = mod % 60
+    return f"{h:02d}:{m:02d}:{s:02d}", day_offset
 
 # -------------------------
 # Pretty time formatting
@@ -391,6 +421,7 @@ def main():
     ap.add_argument("--language", default="en")
     ap.add_argument("--task", default="transcribe")
     ap.add_argument("--device", default="auto", help="auto|cuda|cpu")
+    ap.add_argument("--clock-start", default=None, help="HH:MM:SS from first video frame; used to emit clock_start/clock_end columns")
     ap.add_argument("--min-seg-sec", type=float, default=0.15)
     args = ap.parse_args()
 
@@ -403,6 +434,7 @@ def main():
     import torch
 
     device, device_note = pick_device(args.device)
+    base_clock_sec = parse_clock_start_to_sec(args.clock_start)
 
     status = {
         "state": "running",
@@ -421,6 +453,7 @@ def main():
         "torch_version": getattr(torch, "__version__", None),
         "torch_cuda": getattr(torch.version, "cuda", None),
         "cuda_available": bool(torch.cuda.is_available()),
+        "clock_start": args.clock_start,
         "segment_i": 0,
         "segment_n": None,
         "audio_duration_sec": None,
@@ -461,6 +494,14 @@ def main():
             end_sec = float(diar.at[i, "end"])
             speaker = str(diar.at[i, "speaker"])
 
+            # Derived wall-clock fields (optional)
+            if base_clock_sec is not None:
+                seg_clock_start, seg_day_offset_start = wall_clock_from_offset(base_clock_sec, start_sec)
+                seg_clock_end, seg_day_offset_end = wall_clock_from_offset(base_clock_sec, end_sec)
+            else:
+                seg_clock_start = seg_clock_end = None
+                seg_day_offset_start = seg_day_offset_end = None
+
             # skip tiny segments
             if end_sec - start_sec < args.min_seg_sec:
                 rows.append({
@@ -468,6 +509,10 @@ def main():
                     "speaker": speaker,
                     "start": sec_to_hms(start_sec),
                     "end": sec_to_hms(end_sec),
+                    "clock_start": seg_clock_start,
+                    "clock_end": seg_clock_end,
+                    "day_offset_start": seg_day_offset_start,
+                    "day_offset_end": seg_day_offset_end,
                     "start_sec": start_sec,
                     "end_sec": end_sec,
                     "signal_to_noise_ratio": None,
@@ -503,8 +548,10 @@ def main():
                 "speaker": speaker,
                 "start": sec_to_hms(start_sec),
                 "end": sec_to_hms(end_sec),
-                "start_sec": start_sec,
-                "end_sec": end_sec,
+                "clock_start": seg_clock_start,
+                "clock_end": seg_clock_end,
+                "day_offset_start": seg_day_offset_start,
+                "day_offset_end": seg_day_offset_end,
                 "signal_to_noise_ratio": snr_out,
                 "transcription_confidence_score": conf,
                 "audio_mag": rms,
@@ -518,12 +565,23 @@ def main():
             for j, sp in enumerate(spans):
                 s0 = float(sp["start"])
                 s1 = float(sp["end"])
+                if base_clock_sec is not None:
+                    sent_clock_start, sent_day_offset_start = wall_clock_from_offset(base_clock_sec, s0)
+                    sent_clock_end, sent_day_offset_end = wall_clock_from_offset(base_clock_sec, s1)
+                else:
+                    sent_clock_start = sent_clock_end = None
+                    sent_day_offset_start = sent_day_offset_end = None
+
                 sent_rows.append({
                     "seg_idx": i,
                     "sentence_i": j,
                     "speaker": speaker,
                     "start": sec_to_hms(s0),
                     "end": sec_to_hms(s1),
+                    "clock_start": sent_clock_start,
+                    "clock_end": sent_clock_end,
+                    "day_offset_start": sent_day_offset_start,
+                    "day_offset_end": sent_day_offset_end,
                     "sentence": sp["sentence"],
                     "signal_to_noise_ratio": snr_out,
                     "transcription_confidence_score": conf,

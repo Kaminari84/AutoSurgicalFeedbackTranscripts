@@ -197,6 +197,7 @@ def transcribe_via_cli_with_progress(
     language: str = "en",
     task: str = "transcribe",
     device: Optional[str] = None,
+    clock_start: Optional[str] = None,
 ) -> None:
     tr_status = job_dir / "transcription_status.json"
     tr_log = job_dir / "transcribe_cli.log"
@@ -227,6 +228,9 @@ def transcribe_via_cli_with_progress(
         "--task", task,
         "--device", ASR_DEVICE,
     ]
+
+    if clock_start:
+        cmd += ["--clock-start", clock_start]
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -409,6 +413,7 @@ def main():
             language=os.getenv("ASR_LANG", "en"),
             task=os.getenv("ASR_TASK", "transcribe"),
             device=None,
+            clock_start=args.clock_start
         )
 
         # finalize transcription stage
