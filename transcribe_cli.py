@@ -524,8 +524,6 @@ def main():
                     "speaker": speaker,
                     "start": sec_to_hms(s0),
                     "end": sec_to_hms(s1),
-                    "start_sec": s0,
-                    "end_sec": s1,
                     "sentence": sp["sentence"],
                     "signal_to_noise_ratio": snr_out,
                     "transcription_confidence_score": conf,
