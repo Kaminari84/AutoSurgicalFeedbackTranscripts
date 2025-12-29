@@ -15,6 +15,72 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 
+
+# -------------------------
+# Pretty time formatting
+# -------------------------
+def sec_to_hms(sec: float | None) -> str:
+    """Format seconds-from-start into HH:MM:SS.mmm"""
+    if sec is None:
+        return ""
+    try:
+        x = float(sec)
+    except Exception:
+        return ""
+    if math.isnan(x):
+        return ""
+    sign = "-" if x < 0 else ""
+    x = abs(x)
+
+    h = int(x // 3600)
+    x -= h * 3600
+    m = int(x // 60)
+    x -= m * 60
+    s = int(x)
+    ms = int(round((x - s) * 1000.0))
+
+    # handle rounding overflow (e.g., 1.9996 -> 2.000)
+    if ms == 1000:
+        ms = 0
+        s += 1
+    if s == 60:
+        s = 0
+        m += 1
+    if m == 60:
+        m = 0
+        h += 1
+
+    return f"{sign}{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def round_or_none(x: Any, ndigits: int) -> Any:
+    try:
+        if x is None:
+            return None
+        xf = float(x)
+        if math.isnan(xf):
+            return None
+        return round(xf, ndigits)
+    except Exception:
+        return None
+
+
+def confidence_from_avg_logprob(avg_logprob: float | None) -> float | None:
+    """
+    Turn avg_logprob into a [0,1] confidence-like score.
+    Using exp(avg_logprob) = geometric mean token prob (simple + stable).
+    """
+    if avg_logprob is None:
+        return None
+    try:
+        v = float(avg_logprob)
+        if math.isnan(v):
+            return None
+        return float(math.exp(v))
+    except Exception:
+        return None
+
+
 def pick_device(requested: Optional[str] = None) -> tuple[str, Optional[str]]:
     """
     Prefer CUDA by default, but only if it is actually usable.
@@ -25,7 +91,6 @@ def pick_device(requested: Optional[str] = None) -> tuple[str, Optional[str]]:
     import torch
 
     def cuda_probe() -> None:
-        # Minimal op to confirm kernels actually work on this GPU
         x = torch.randn((256, 256), device="cuda")
         y = x @ x
         _ = float(y.mean().item())
@@ -36,7 +101,6 @@ def pick_device(requested: Optional[str] = None) -> tuple[str, Optional[str]]:
     if req == "cpu":
         return "cpu", None
 
-    # req is "cuda" or "auto"
     if torch.version.cuda is None:
         if req == "cuda":
             return "cpu", "CUDA requested but this torch build has torch.version.cuda=None (CPU-only build)"
@@ -51,7 +115,6 @@ def pick_device(requested: Optional[str] = None) -> tuple[str, Optional[str]]:
         cuda_probe()
         return "cuda", None
     except Exception as e:
-        # CUDA exists but isn't usable (common w/ capability mismatch, missing kernels, bad driver pairing, etc.)
         if req == "cuda":
             return "cpu", f"CUDA requested but probe failed: {e}"
         return "cpu", f"CUDA probe failed; falling back to CPU: {e}"
@@ -89,7 +152,7 @@ class StatusWriter:
 
 
 # -------------------------
-# Sentence splitting + spans (matches your Colab logic)
+# Sentence splitting + spans
 # -------------------------
 _SENT_SPLIT_RE = r'(\s*[.?!…]+["”\']*\s+)'
 
@@ -136,7 +199,6 @@ def proportional_sentence_spans(
         out.append({"start": s_start, "end": s_end, "sentence": s})
         cur = s_end
 
-    # snap last end exactly to seg_end_abs
     out[-1]["end"] = float(seg_end_abs)
     return out
 
@@ -154,15 +216,11 @@ def load_audio_mono(path: Path, *, dtype="float32") -> Tuple[np.ndarray, int, fl
     duration = frames / float(sr)
 
     wav, _sr = sf.read(str(path), dtype=dtype, always_2d=True)
-    # wav: (T, C)
     mono = wav.mean(axis=1)
     return mono, sr, duration
 
 
 def estimate_noise_floor_rms(mono: np.ndarray, sr: int) -> float:
-    """
-    Roughly mirrors your Colab: 20ms frames, 10th percentile RMS. :contentReference[oaicite:2]{index=2}
-    """
     frame_len = max(1, int(0.02 * sr))
     if mono.shape[0] < frame_len:
         return 1e-3
@@ -170,40 +228,6 @@ def estimate_noise_floor_rms(mono: np.ndarray, sr: int) -> float:
     x = mono[: n_frames * frame_len].reshape(n_frames, frame_len)
     rms = np.sqrt(np.mean(x * x, axis=1) + 1e-12)
     return float(np.quantile(rms, 0.10))
-
-# -------------------------
-# Colab-style derived metrics
-# -------------------------
-def compute_signal_to_noise_ratio(snr_db: float | None) -> float | None:
-    """Colab used: df['signal_to_noise_ratio'] = df['snr_db'].round(2)."""
-    if snr_db is None:
-        return None
-    try:
-        return float(round(float(snr_db), 2))
-    except Exception:
-        return None
-
-def compute_transcription_confidence_score(
-    avg_logprob: float | None,
-    avg_entropy: float | None,
-    *,
-    entropy_max: float = 8.0,
-) -> float | None:
-    """
-    Colab-style:
-      transcription_confidence_score = exp(asr_avg_logprob) * (1 - clip(asr_avg_entropy/8, 0, 1))
-    """
-    if avg_logprob is None or avg_entropy is None:
-        return None
-    try:
-        lp = float(avg_logprob)
-        ent = float(avg_entropy)
-    except Exception:
-        return None
-
-    ent_norm = float(np.clip(ent / float(entropy_max), 0.0, 1.0))
-    score = float(np.exp(lp) * (1.0 - ent_norm))
-    return score
 
 
 # -------------------------
@@ -219,7 +243,6 @@ def load_whisper(model_name: str, device: str, language: str, task: str):
     dev = torch.device(device)
     model.to(dev)
 
-    # Match your Colab intent: set language + task to avoid surprises :contentReference[oaicite:3]{index=3}
     try:
         model.generation_config.language = language
         model.generation_config.task = task
@@ -236,13 +259,8 @@ def transcribe_chunk(
     model,
     device,
 ) -> Dict[str, Any]:
-    """
-    Returns: text + avg_logprob + avg_entropy (teacher-forced on generated seq)
-    Mirrors your Colab pattern (generate -> teacher-forced logits). :contentReference[oaicite:4]{index=4}
-    """
     import torch
 
-    # processor wants float array (T,)
     inputs = processor(
         audio_16k,
         sampling_rate=16000,
@@ -259,15 +277,13 @@ def transcribe_chunk(
             return_dict_in_generate=True,
         )
 
-    seq = gen.sequences  # (1, T)
+    seq = gen.sequences
     text = processor.batch_decode(seq, skip_special_tokens=True)[0].strip()
 
     pad_id = getattr(processor.tokenizer, "pad_token_id", None)
     if pad_id is None:
-        # Whisper tokenizer should have pad; fallback
         return {"text": text, "avg_logprob": None, "avg_entropy": None}
 
-    # teacher-forced forward pass
     decoder_input_ids = seq[:, :-1].contiguous()
     labels = seq[:, 1:].contiguous()
     mask = labels != pad_id
@@ -280,7 +296,7 @@ def transcribe_chunk(
             attention_mask=inputs.get("attention_mask", None),
             decoder_input_ids=decoder_input_ids,
         )
-        logits = outs.logits[0]  # (T-1, vocab)
+        logits = outs.logits[0]
 
     log_probs = torch.log_softmax(logits, dim=-1)
     tgt = labels[0].clone()
@@ -309,22 +325,14 @@ def transcribe_segment_with_chunking(
     chunk_s: float = 28.0,
     overlap_s: float = 2.0,
 ) -> Dict[str, Any]:
-    """
-    Whisper is happiest around ~30s windows; chunk long diar segments.
-    Produces concatenated text and weighted avg metrics.
-    """
-    # slice
     i0 = max(0, int(start_sec * sr))
     i1 = min(mono.shape[0], int(end_sec * sr))
     seg = mono[i0:i1]
     if seg.size == 0:
         return {"text": "", "avg_logprob": None, "avg_entropy": None}
 
-    # resample if needed (should already be 16k from your ffmpeg step, but keep safe)
     if sr != 16000:
-        # lightweight polyphase resample via scipy
         from scipy.signal import resample_poly
-
         g = math.gcd(sr, 16000)
         up = 16000 // g
         down = sr // g
@@ -334,7 +342,6 @@ def transcribe_segment_with_chunking(
         seg = seg.astype(np.float32, copy=False)
         sr2 = sr
 
-    # chunk
     if (i1 - i0) / sr2 <= chunk_s:
         return transcribe_chunk(seg, processor, model, device)
 
@@ -383,9 +390,8 @@ def main():
     ap.add_argument("--model", default="openai/whisper-large-v3")
     ap.add_argument("--language", default="en")
     ap.add_argument("--task", default="transcribe")
-    ap.add_argument("--device", default="auto", help="auto|cuda|cpu (default: auto, prefers cuda)")
+    ap.add_argument("--device", default="auto", help="auto|cuda|cpu")
     ap.add_argument("--min-seg-sec", type=float, default=0.15)
-    ap.add_argument("--entropy-max", type=float, default=8.0, help="normalizer for confidence score (default: 8.0)")
     args = ap.parse_args()
 
     audio_path = Path(args.audio)
@@ -394,7 +400,7 @@ def main():
     out_sent = Path(args.out_sentences_csv) if args.out_sentences_csv else out_csv.with_name(out_csv.stem + "_sentences.csv")
     status_path = Path(args.status_json) if args.status_json else out_csv.with_suffix(".status.json")
 
-    import torch  # still fine to import here
+    import torch
 
     device, device_note = pick_device(args.device)
 
@@ -451,82 +457,83 @@ def main():
         t0 = time.time()
 
         for i in range(n):
-            start = float(diar.at[i, "start"])
-            end = float(diar.at[i, "end"])
+            start_sec = float(diar.at[i, "start"])
+            end_sec = float(diar.at[i, "end"])
             speaker = str(diar.at[i, "speaker"])
 
             # skip tiny segments
-            if end - start < args.min_seg_sec:
-                snr_db = float("-inf")
-                sig_noise = compute_signal_to_noise_ratio(snr_db)
-                conf = None
-                r = {
+            if end_sec - start_sec < args.min_seg_sec:
+                rows.append({
                     "seg_idx": i,
                     "speaker": speaker,
-                    "start": start,
-                    "end": end,
+                    "start": sec_to_hms(start_sec),
+                    "end": sec_to_hms(end_sec),
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "signal_to_noise_ratio": None,
+                    "transcription_confidence_score": None,
                     "audio_mag": 0.0,
-                    "snr_db": snr_db,
-                    "signal_to_noise_ratio": sig_noise,
                     "transcription": "",
                     "asr_avg_logprob": None,
                     "asr_avg_entropy": None,
-                    "transcription_confidence_score": conf,
-                }
-                rows.append(r)
+                })
                 continue
 
-            # audio metrics (like your Colab loop) :contentReference[oaicite:5]{index=5}
-            i0 = max(0, int(start * sr))
-            i1 = min(mono.shape[0], int(end * sr))
+            # audio metrics
+            i0 = max(0, int(start_sec * sr))
+            i1 = min(mono.shape[0], int(end_sec * sr))
             seg = mono[i0:i1]
             rms = float(np.sqrt(np.mean(seg * seg) + eps)) if seg.size else 0.0
-            snr_db = float(20.0 * math.log10((rms + eps) / (noise_rms + eps))) if seg.size else float("-inf")
+            snr_db = float(20.0 * math.log10((rms + eps) / (noise_rms + eps))) if seg.size else float("nan")
 
             tr = transcribe_segment_with_chunking(
-                mono, sr, start, end,
+                mono, sr, start_sec, end_sec,
                 processor, model, dev,
             )
             text = (tr.get("text") or "").strip()
             avg_lp = tr.get("avg_logprob", None)
             avg_ent = tr.get("avg_entropy", None)
 
-            sig_noise = compute_signal_to_noise_ratio(snr_db)
-            conf = compute_transcription_confidence_score(avg_lp, avg_ent, entropy_max=float(args.entropy_max))
+            conf = confidence_from_avg_logprob(avg_lp)
+            conf = round_or_none(conf, 2)
+            snr_out = round_or_none(snr_db, 2)
 
-            r = {
+            rows.append({
                 "seg_idx": i,
                 "speaker": speaker,
-                "start": start,
-                "end": end,
+                "start": sec_to_hms(start_sec),
+                "end": sec_to_hms(end_sec),
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "signal_to_noise_ratio": snr_out,
+                "transcription_confidence_score": conf,
                 "audio_mag": rms,
-                "snr_db": snr_db,
-                "signal_to_noise_ratio": sig_noise,
                 "transcription": text,
                 "asr_avg_logprob": avg_lp,
                 "asr_avg_entropy": avg_ent,
-                "transcription_confidence_score": conf,
-            }
-            rows.append(r)
+            })
 
-            # sentence splitting (proportional fallback) :contentReference[oaicite:6]{index=6}
-            spans = proportional_sentence_spans(text, seg_start_abs=start, seg_end_abs=end)
+            # sentence splitting (proportional fallback)
+            spans = proportional_sentence_spans(text, seg_start_abs=start_sec, seg_end_abs=end_sec)
             for j, sp in enumerate(spans):
+                s0 = float(sp["start"])
+                s1 = float(sp["end"])
                 sent_rows.append({
                     "seg_idx": i,
                     "sentence_i": j,
                     "speaker": speaker,
-                    "start": float(sp["start"]),
-                    "end": float(sp["end"]),
+                    "start": sec_to_hms(s0),
+                    "end": sec_to_hms(s1),
+                    "start_sec": s0,
+                    "end_sec": s1,
                     "sentence": sp["sentence"],
-                    # propagate per-segment metrics to each sentence row (Colab-style)
-                    "signal_to_noise_ratio": sig_noise,
+                    "signal_to_noise_ratio": snr_out,
                     "transcription_confidence_score": conf,
                 })
 
             # progress update
             elapsed = time.time() - t0
-            p = 5 + int(95 * (i + 1) / max(1, n))  # keep 0..100 with headroom
+            p = 5 + int(95 * (i + 1) / max(1, n))
             sw.update(
                 stage="transcribing",
                 progress=min(99, max(0, p)),
@@ -534,7 +541,7 @@ def main():
                 message=f"transcribing… ({i+1}/{n}, elapsed {int(elapsed)}s)",
             )
 
-            # write partials occasionally (nice for debugging)
+            # write partials occasionally
             if (i + 1) % 10 == 0:
                 out_csv.parent.mkdir(parents=True, exist_ok=True)
                 pd.DataFrame(rows).to_csv(str(out_csv) + ".part.csv", index=False)
