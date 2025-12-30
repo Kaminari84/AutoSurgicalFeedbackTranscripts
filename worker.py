@@ -315,7 +315,6 @@ def add_wall_clock_columns_inplace(sent_csv: Path, first_clock_str: str) -> None
     """
     Adds:
       - clock_start, clock_end (HH:MM:SS, modulo 24h)
-      - day_offset_start, day_offset_end (0,1,2,...)
 
     Requires sent_csv to have start/end as video-relative HH:MM:SS strings.
     Implemented with stdlib only (no pandas dependency).
@@ -348,7 +347,7 @@ def add_wall_clock_columns_inplace(sent_csv: Path, first_clock_str: str) -> None
         fieldnames = list(reader.fieldnames)
 
         # Avoid duplicating columns if rerun
-        for col in ["clock_start", "clock_end", "day_offset_start", "day_offset_end"]:
+        for col in ["clock_start", "clock_end"]:
             if col not in fieldnames:
                 fieldnames.append(col)
 
@@ -365,8 +364,6 @@ def add_wall_clock_columns_inplace(sent_csv: Path, first_clock_str: str) -> None
             day_off_s = start_abs // 86400
             day_off_e = end_abs // 86400
 
-            row["day_offset_start"] = str(day_off_s)
-            row["day_offset_end"] = str(day_off_e)
             row["clock_start"] = seconds_to_hms(start_abs % 86400)
             row["clock_end"] = seconds_to_hms(end_abs % 86400)
 
@@ -636,7 +633,7 @@ def main():
             stage_progress=100,
             progress=100,
             message="completed (audio + diarization + transcription + irr classification)",
-            finished=_now_iso(),
+            finished=datetime.now().isoformat(timespec="seconds"),
             force=True,
         )
 
