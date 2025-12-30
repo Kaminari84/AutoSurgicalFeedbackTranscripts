@@ -22,16 +22,19 @@ DIARIZE_CLI = APP_ROOT / "diarize_cli.py"
 # ASR env + script
 ASR_PYTHON = APP_ROOT / ".conda" / "asr" / "bin" / "python"
 
-# Transcription
-TRANSCRIBE_CLI = APP_ROOT / "transcribe_cli.py"
-
 # -------------------------
 # Classifiers
 # -------------------------
 CLASSIFY_CLI = APP_ROOT / "classify_cli.py"
-CLASSIFIERS_ROOT = APP_ROOT / "classifiers"
-THRESHOLDS_JSON  = CLASSIFIERS_ROOT / "thresholds.json"
+CLASSIFY_JAMA_CLI = APP_ROOT / "classify_jama_cli.py"
+# Where fine-tuned classifier model folders live, expected layout:
+#   <CLASSIFIERS_ROOT>/<LABEL>/  (HuggingFace saved model dir)
+CLASSIFIERS_ROOT = Path(os.getenv("CLASSIFIERS_ROOT", str(APP_ROOT / "classifiers"))).expanduser()
+THRESHOLDS_JSON  = Path(os.getenv("THRESHOLDS_JSON",  str(CLASSIFIERS_ROOT / "thresholds.json"))).expanduser()
+JAMA_CLASSIFIERS_ROOT = CLASSIFIERS_ROOT
 
+
+TRANSCRIBE_CLI = APP_ROOT / "transcribe_cli.py"
 ASR_DEVICE = os.getenv("ASR_DEVICE", "auto")  # auto|cuda|cpu
 
 # -------------------------
@@ -395,10 +398,6 @@ def classify_irrelevant_via_cli_with_progress(
     irr_status = job_dir / "irr_classification_status.json"
     irr_log = job_dir / "irr_classification.log"
 
-    _require_file(CLASSIFY_CLI, "CLASSIFY_CLI")
-    _require_file(CLASSIFIERS_ROOT, "CLASSIFIERS_ROOT")
-    _require_file(THRESHOLDS_JSON, "THRESHOLDS_JSON")
-
     cmd = [
         str(ASR_PYTHON),
         str(CLASSIFY_CLI),
@@ -464,6 +463,107 @@ def classify_irrelevant_via_cli_with_progress(
         irr_classification_status_path=str(irr_status),
         irr_classification_log=str(irr_log),
         transcript_sentences_classified_csv=str(out_sent_classified_csv),
+        force=True,
+    )
+
+def classify_jama_via_cli_with_progress(
+    *,
+    job_dir: Path,
+    in_sent_csv: Path,
+    out_sent_csv: Path,
+    jama_status_path: Path,
+    jama_log_path: Path,
+    sw: StatusWriter,
+    python_bin: Path,
+    cli_path: Path,
+    models_root: Path,
+    device: str = "auto",
+) -> None:
+    """Run sentence-level JAMA classification CLI and mirror its status into the main worker status JSON."""
+
+    out_sent_csv.parent.mkdir(parents=True, exist_ok=True)
+    jama_status_path.parent.mkdir(parents=True, exist_ok=True)
+    jama_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        str(python_bin),
+        str(cli_path),
+        "--in-csv",
+        str(in_sent_csv),
+        "--out-csv",
+        str(out_sent_csv),
+        "--status-json",
+        str(jama_status_path),
+        "--models-root",
+        str(models_root),
+        "--device",
+        str(device),
+    ]
+
+    with open(jama_log_path, "w", encoding="utf-8") as logf:
+        logf.write(f"[{datetime.now().isoformat(timespec='seconds')}] job={job_dir} launching JAMA classification\n")
+        logf.write("CMD: " + " ".join(cmd) + "\n\n")
+        logf.flush()
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(APP_ROOT),
+            env={**os.environ},
+        )
+
+        last_msg = None
+        while True:
+            rc = proc.poll()
+
+            s = _read_json(jama_status_path) or {}
+            stage_prog = int(s.get("progress", 0) or 0)
+            msg = str(s.get("message") or "")
+            label = s.get("label")
+            row_i = s.get("row_i")
+            row_n = s.get("row_n")
+
+            # Map JAMA stage's 0..100 -> overall ~99..100 (Irrelevant already uses 95..99)
+            overall = 99 + int(1 * (stage_prog / 100.0))
+
+            pretty = msg
+            if label is not None:
+                pretty = f"{pretty} (label={label})"
+            if row_i is not None and row_n is not None:
+                pretty = f"{pretty} ({row_i}/{row_n})"
+
+            if pretty != last_msg:
+                sw.update(
+                    stage="jama_classification",
+                    stage_progress=stage_prog,
+                    progress=min(99, max(0, overall)),
+                    message=pretty,
+                    jama_classification_status_path=str(jama_status_path),
+                    jama_classification_log=str(jama_log_path),
+                    transcript_sentences_jama_classified_csv=str(out_sent_csv),
+                )
+                last_msg = pretty
+
+            if rc is not None:
+                break
+
+            time.sleep(0.35)
+
+        if rc != 0:
+            raise RuntimeError(f"JAMA classification failed (exit {rc}). See log: {jama_log_path}")
+
+    _require_file(out_sent_csv, f"JAMA output CSV missing: {out_sent_csv}")
+
+    sw.update(
+        stage="jama_classification",
+        stage_progress=100,
+        progress=99,
+        message="JAMA classification done",
+        jama_classification_status_path=str(jama_status_path),
+        jama_classification_log=str(jama_log_path),
+        transcript_sentences_jama_classified_csv=str(out_sent_csv),
         force=True,
     )
 
@@ -625,6 +725,31 @@ def main():
             device="auto",
         )
         # -------------------------
+
+        # Step 6: JAMA classification (sentence-level)
+        sw.update(
+            stage="jama_classification",
+            stage_progress=0,
+            message="JAMA classification starting",
+            progress=99,
+            force=True,
+        )
+        out_sent_jama_csv = job_dir / "transcript_sentences_jama_classified.csv"
+        jama_status_path = job_dir / "jama_classification_status.json"
+        jama_log_path = job_dir / "jama_classification.log"
+
+        classify_jama_via_cli_with_progress(
+            job_dir=job_dir,
+            in_sent_csv=out_sent_classified_csv,
+            out_sent_csv=out_sent_jama_csv,
+            jama_status_path=jama_status_path,
+            jama_log_path=jama_log_path,
+            sw=sw,
+            python_bin=ASR_PYTHON,  # JAMA models run in the ASR env (transformers/torch)
+            cli_path=CLASSIFY_JAMA_CLI,
+            models_root=JAMA_CLASSIFIERS_ROOT,
+            device="auto",
+        )
 
         # Mark done
         sw.update(
