@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 import subprocess
@@ -20,7 +21,17 @@ DIARIZE_CLI = APP_ROOT / "diarize_cli.py"
 
 # ASR env + script
 ASR_PYTHON = APP_ROOT / ".conda" / "asr" / "bin" / "python"
+
+# Transcription
 TRANSCRIBE_CLI = APP_ROOT / "transcribe_cli.py"
+
+# -------------------------
+# Classifiers
+# -------------------------
+CLASSIFY_CLI = APP_ROOT / "classify_cli.py"
+CLASSIFIERS_ROOT = APP_ROOT / "classifiers"
+THRESHOLDS_JSON  = CLASSIFIERS_ROOT / "thresholds.json"
+
 ASR_DEVICE = os.getenv("ASR_DEVICE", "auto")  # auto|cuda|cpu
 
 # -------------------------
@@ -197,7 +208,6 @@ def transcribe_via_cli_with_progress(
     language: str = "en",
     task: str = "transcribe",
     device: Optional[str] = None,
-    clock_start: Optional[str] = None,
 ) -> None:
     tr_status = job_dir / "transcription_status.json"
     tr_log = job_dir / "transcribe_cli.log"
@@ -228,9 +238,6 @@ def transcribe_via_cli_with_progress(
         "--task", task,
         "--device", ASR_DEVICE,
     ]
-
-    if clock_start:
-        cmd += ["--clock-start", clock_start]
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -300,6 +307,169 @@ def transcribe_via_cli_with_progress(
     if not out_sent_csv.exists():
         raise RuntimeError(f"transcribe_cli finished but did not create: {out_sent_csv}")
 
+
+# -------------------------
+# Wall-clock augmentation (adds clock_* columns to transcript_sentences.csv)
+# -------------------------
+def add_wall_clock_columns_inplace(sent_csv: Path, first_clock_str: str) -> None:
+    """
+    Adds:
+      - clock_start, clock_end (HH:MM:SS, modulo 24h)
+      - day_offset_start, day_offset_end (0,1,2,...)
+
+    Requires sent_csv to have start/end as video-relative HH:MM:SS strings.
+    Implemented with stdlib only (no pandas dependency).
+    """
+    def hms_to_seconds(hms: str) -> int:
+        parts = (hms or "").strip().split(":")
+        if len(parts) != 3:
+            return 0
+        try:
+            h, m, s = (int(float(x)) for x in parts)  # tolerate "00", "00.0"
+        except Exception:
+            return 0
+        return h * 3600 + m * 60 + s
+
+    def seconds_to_hms(sec: int) -> str:
+        sec = int(sec)
+        h = sec // 3600
+        sec -= h * 3600
+        m = sec // 60
+        s = sec - m * 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    base_sec = hms_to_seconds(first_clock_str)
+
+    tmp_path = sent_csv.with_suffix(".tmp")
+    with sent_csv.open("r", newline="") as f_in, tmp_path.open("w", newline="") as f_out:
+        reader = csv.DictReader(f_in)
+        if reader.fieldnames is None:
+            return
+        fieldnames = list(reader.fieldnames)
+
+        # Avoid duplicating columns if rerun
+        for col in ["clock_start", "clock_end", "day_offset_start", "day_offset_end"]:
+            if col not in fieldnames:
+                fieldnames.append(col)
+
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in reader:
+            start_rel = hms_to_seconds(row.get("start", ""))
+            end_rel = hms_to_seconds(row.get("end", ""))
+
+            start_abs = base_sec + start_rel
+            end_abs = base_sec + end_rel
+
+            day_off_s = start_abs // 86400
+            day_off_e = end_abs // 86400
+
+            row["day_offset_start"] = str(day_off_s)
+            row["day_offset_end"] = str(day_off_e)
+            row["clock_start"] = seconds_to_hms(start_abs % 86400)
+            row["clock_end"] = seconds_to_hms(end_abs % 86400)
+
+            writer.writerow(row)
+
+    tmp_path.replace(sent_csv)
+
+
+def classify_irrelevant_via_cli_with_progress(
+    in_sent_csv: Path,
+    out_sent_classified_csv: Path,
+    job_dir: Path,
+    sw: StatusWriter,
+    *,
+    device: str = "auto",
+    batch_size: int = 64,
+    max_length: int = 256,
+    label: str = "Irrelevant",
+) -> None:
+    """
+    Runs classify_cli.py (in ASR env by default) and maps its progress to:
+      overall progress: 95..99
+      stage_progress:   0..100
+    Produces:
+      - out_sent_classified_csv
+      - irr_classification_status.json
+      - irr_classification.log
+    """
+    irr_status = job_dir / "irr_classification_status.json"
+    irr_log = job_dir / "irr_classification.log"
+
+    _require_file(CLASSIFY_CLI, "CLASSIFY_CLI")
+    _require_file(CLASSIFIERS_ROOT, "CLASSIFIERS_ROOT")
+    _require_file(THRESHOLDS_JSON, "THRESHOLDS_JSON")
+
+    cmd = [
+        str(ASR_PYTHON),
+        str(CLASSIFY_CLI),
+        "--in-csv", str(in_sent_csv),
+        "--out-csv", str(out_sent_classified_csv),
+        "--text-col", "sentence",
+        "--status-json", str(irr_status),
+        "--label", label,
+        "--thresholds-json", str(THRESHOLDS_JSON),
+        "--models-root", str(CLASSIFIERS_ROOT),
+        "--device", device,
+        "--batch-size", str(batch_size),
+        "--max-length", str(max_length),
+    ]
+
+    job_dir.mkdir(parents=True, exist_ok=True)
+    with irr_log.open("w") as logf:
+        p = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT)
+
+    last_msg = "starting irrelevant classification..."
+    last_overall = None
+
+    while True:
+        st = _read_json(irr_status) or {}
+        stage_prog = int(st.get("progress", 0) or 0)
+        msg = st.get("message") or last_msg
+        row_i = st.get("row_i", None)
+        row_n = st.get("row_n", None)
+
+        # map 0..100 -> 95..99 (leave 100 for pipeline "done")
+        overall = 95 + int(4 * max(0, min(100, stage_prog)) / 100)
+
+        if overall != last_overall or msg != last_msg:
+            sw.update(
+                stage="irr_classification",
+                stage_progress=stage_prog,
+                progress=overall,
+                message=msg,
+                irr_classification_status_path=str(irr_status),
+                irr_classification_log=str(irr_log),
+                transcript_sentences_classified_csv=str(out_sent_classified_csv),
+                sentence_i=row_i,
+                sentence_n=row_n,
+            )
+            last_overall = overall
+            last_msg = msg
+
+        if p.poll() is not None:
+            break
+        time.sleep(0.5)
+
+    if p.returncode != 0:
+        _require_file(irr_log, "irr_classification.log")
+        tail = "\n".join(irr_log.read_text(errors="ignore").splitlines()[-40:])
+        raise RuntimeError(f"Irrelevant classification failed (exit={p.returncode}). Log tail:\n{tail}")
+
+    _require_file(out_sent_classified_csv, "transcript_sentences_classified.csv")
+    sw.update(
+        stage="irr_classification",
+        stage_progress=100,
+        progress=99,
+        message="irrelevant classification done",
+        irr_classification_status_path=str(irr_status),
+        irr_classification_log=str(irr_log),
+        transcript_sentences_classified_csv=str(out_sent_classified_csv),
+        force=True,
+    )
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -334,6 +504,11 @@ def main():
         "num_segments": None,
         "transcript_segments_csv": None,
         "transcript_sentences_csv": None,
+        "transcript_sentences_classified_csv": None,
+        "irr_classification_status_path": None,
+        "irr_classification_log": None,
+        "sentence_i": 0,
+        "sentence_n": None,
 
         # logs/statuses
         "diarization_status_path": None,
@@ -413,10 +588,14 @@ def main():
             language=os.getenv("ASR_LANG", "en"),
             task=os.getenv("ASR_TASK", "transcribe"),
             device=None,
-            clock_start=args.clock_start
         )
 
         # finalize transcription stage
+        
+        # Optional: add wall-clock columns to transcript_sentences.csv using OCR time from first frame
+        if args.clock_start:
+            sw.update(stage="transcription", stage_progress=99, progress=94, message="adding wall-clock columns", force=True)
+            add_wall_clock_columns_inplace(out_sent_csv, args.clock_start)
         sw.update(
             stage="transcription",
             stage_progress=100,
@@ -428,15 +607,38 @@ def main():
         )
 
         # -------------------------
-        # Placeholders for next steps
+        # Step 5: Irrelevant classification (sentence-level)
         # -------------------------
-        sw.update(stage="transcription", stage_progress=0, message="(placeholder) transcription not implemented yet", progress=60, force=True)
+        out_sent_classified_csv = job_dir / "transcript_sentences_classified.csv"
+        sw.update(
+            stage="irr_classification",
+            stage_progress=0,
+            message="starting irrelevant classification",
+            progress=95,
+            transcript_sentences_classified_csv=str(out_sent_classified_csv),
+            irr_classification_status_path=str(job_dir / "irr_classification_status.json"),
+            irr_classification_log=str(job_dir / "irr_classification.log"),
+            force=True,
+        )
+        classify_irrelevant_via_cli_with_progress(
+            in_sent_csv=out_sent_csv,
+            out_sent_classified_csv=out_sent_classified_csv,
+            job_dir=job_dir,
+            sw=sw,
+            device="auto",
+        )
+        # -------------------------
 
-        status["state"] = "done"
-        status["progress"] = 100
-        status["finished"] = datetime.now().isoformat(timespec="seconds")
-        status["message"] = "completed (audio + diarization)"
-        atomic_write_json(status_path, status)
+        # Mark done
+        sw.update(
+            state="done",
+            stage="done",
+            stage_progress=100,
+            progress=100,
+            message="completed (audio + diarization + transcription + irr classification)",
+            finished=_now_iso(),
+            force=True,
+        )
 
     except Exception as e:
         status["state"] = "failed"

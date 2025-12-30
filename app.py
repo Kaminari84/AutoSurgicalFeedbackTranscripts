@@ -526,6 +526,7 @@ else:
                 download_row("Raw audio", s.get("raw_audio_path"), key=f"dl-{jd.name}-rawwav")
                 download_row("Denoised audio", s.get("denoised_audio_path"), key=f"dl-{jd.name}-denwav")
                 download_row("Transcript (sentences)", s.get("transcript_sentences_csv"), key=f"dl-{jd.name}-trsent")
+                download_row("Transcript (sentences, classified)", s.get("transcript_sentences_classified_csv"), key=f"dl-{jd.name}-clfsent")
 
             # ---- Only show progress/status UI if NOT completed ----
             if not done:
@@ -552,6 +553,18 @@ else:
                         seg_i_i = int(seg_i or 0)
                         if seg_n_i > 0:
                             st.caption(f"Segments: {seg_i_i}/{seg_n_i}")
+
+                            # Sentence counter (for classification)
+                            sent_i = s.get("sentence_i")
+                            sent_n = s.get("sentence_n")
+                            if sent_n is not None:
+                                try:
+                                    sent_n_i = int(sent_n)
+                                    sent_i_i = int(sent_i or 0)
+                                    if sent_n_i > 0:
+                                        st.caption(f"Sentences: {sent_i_i}/{sent_n_i}")
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
             else:

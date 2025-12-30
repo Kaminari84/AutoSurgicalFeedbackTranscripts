@@ -31,6 +31,9 @@ jobs/
 *.avi
 *.mkv
 
+# model weights, too big to commit
+classifiers/
+
 # OS/editor
 .DS_Store
 .vscode/
