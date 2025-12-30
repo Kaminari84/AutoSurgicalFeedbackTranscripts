@@ -342,8 +342,8 @@ def main() -> None:
 
             # Append columns
             df[label] = preds.astype(int)
-            df[f"prob_{label}"] = probs.astype(float)
-            df[f"conf_{label}"] = np.round(conf.astype(float), 2)
+            #df[f"prob_{label}"] = probs.astype(float)
+            #df[f"conf_{label}"] = np.round(conf.astype(float), 2)
 
             sw.update(
                 stage="classifying",
