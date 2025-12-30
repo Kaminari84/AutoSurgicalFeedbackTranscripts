@@ -526,8 +526,8 @@ else:
                 download_row("Raw audio", s.get("raw_audio_path"), key=f"dl-{jd.name}-rawwav")
                 download_row("Denoised audio", s.get("denoised_audio_path"), key=f"dl-{jd.name}-denwav")
                 download_row("Transcript (sentences)", s.get("transcript_sentences_csv"), key=f"dl-{jd.name}-trsent")
-                download_row("Transcript (sentences, classified)", s.get("transcript_sentences_classified_csv"), key=f"dl-{jd.name}-trsentcls")
-                download_row("Transcript (sentences, JAMA classified)", s.get("transcript_sentences_jama_classified_csv"), key=f"dl-{jd.name}-sent-jama")
+                download_row("Classified Irrelevent", s.get("transcript_sentences_classified_csv"), key=f"dl-{jd.name}-trsentcls")
+                download_row("Classified JAMA categories", s.get("transcript_sentences_jama_classified_csv"), key=f"dl-{jd.name}-sent-jama")
 
             # ---- Only show progress/status UI if NOT completed ----
             if not done:

@@ -471,8 +471,6 @@ def classify_jama_via_cli_with_progress(
     job_dir: Path,
     in_sent_csv: Path,
     out_sent_csv: Path,
-    jama_status_path: Path,
-    jama_log_path: Path,
     sw: StatusWriter,
     python_bin: Path,
     cli_path: Path,
@@ -481,6 +479,9 @@ def classify_jama_via_cli_with_progress(
 ) -> None:
     """Run sentence-level JAMA classification CLI and mirror its status into the main worker status JSON."""
 
+    jama_status_path = job_dir / "jama_classification_status.json"
+    jama_log_path = job_dir / "classify_jama_cli.log"
+
     out_sent_csv.parent.mkdir(parents=True, exist_ok=True)
     jama_status_path.parent.mkdir(parents=True, exist_ok=True)
     jama_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,16 +489,11 @@ def classify_jama_via_cli_with_progress(
     cmd = [
         str(python_bin),
         str(cli_path),
-        "--in-csv",
-        str(in_sent_csv),
-        "--out-csv",
-        str(out_sent_csv),
-        "--status-json",
-        str(jama_status_path),
-        "--models-root",
-        str(models_root),
-        "--device",
-        str(device),
+        "--in-csv", str(in_sent_csv),
+        "--out-csv", str(out_sent_csv),
+        "--status-json", str(jama_status_path),
+        "--models-root", str(models_root),
+        "--device", str(device),
     ]
 
     with open(jama_log_path, "w", encoding="utf-8") as logf:
@@ -517,16 +513,13 @@ def classify_jama_via_cli_with_progress(
         last_msg = None
         while True:
             rc = proc.poll()
-
             s = _read_json(jama_status_path) or {}
+            
             stage_prog = int(s.get("progress", 0) or 0)
             msg = str(s.get("message") or "")
             label = s.get("label")
             row_i = s.get("row_i")
             row_n = s.get("row_n")
-
-            # Map JAMA stage's 0..100 -> overall ~99..100 (Irrelevant already uses 95..99)
-            overall = 99 + int(1 * (stage_prog / 100.0))
 
             pretty = msg
             if label is not None:
@@ -538,7 +531,6 @@ def classify_jama_via_cli_with_progress(
                 sw.update(
                     stage="jama_classification",
                     stage_progress=stage_prog,
-                    progress=min(99, max(0, overall)),
                     message=pretty,
                     jama_classification_status_path=str(jama_status_path),
                     jama_classification_log=str(jama_log_path),
@@ -559,7 +551,6 @@ def classify_jama_via_cli_with_progress(
     sw.update(
         stage="jama_classification",
         stage_progress=100,
-        progress=99,
         message="JAMA classification done",
         jama_classification_status_path=str(jama_status_path),
         jama_classification_log=str(jama_log_path),
@@ -735,15 +726,11 @@ def main():
             force=True,
         )
         out_sent_jama_csv = job_dir / "transcript_sentences_jama_classified.csv"
-        jama_status_path = job_dir / "jama_classification_status.json"
-        jama_log_path = job_dir / "jama_classification.log"
 
         classify_jama_via_cli_with_progress(
             job_dir=job_dir,
             in_sent_csv=out_sent_classified_csv,
             out_sent_csv=out_sent_jama_csv,
-            jama_status_path=jama_status_path,
-            jama_log_path=jama_log_path,
             sw=sw,
             python_bin=ASR_PYTHON,  # JAMA models run in the ASR env (transformers/torch)
             cli_path=CLASSIFY_JAMA_CLI,
