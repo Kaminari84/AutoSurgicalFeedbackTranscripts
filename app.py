@@ -259,12 +259,21 @@ st.subheader("1) Add video")
 selected = None
 tab1, tab2 = st.tabs(["Pick server-side file (recommended)", "Upload via browser (small tests)"])
 
+VIDEO_EXTS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm",
+    ".mpg", ".mpeg", ".wmv", ".flv", ".ts"
+}
+
 with tab1:
     files = sorted(
-        [p for p in UPLOAD_DIR.glob("*") if p.is_file()], 
-        key=lambda p: p.stat().st_mtime, 
+        [
+            p for p in UPLOAD_DIR.glob("*")
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+        ],
+        key=lambda p: p.stat().st_mtime,
         reverse=True
     )
+
     if not files:
         st.warning(f"No files found in {UPLOAD_DIR}. Upload with rsync/scp, then refresh.")
         st.code(f"rsync -ah --info=progress2 <local_video.mp4> rafal@<DGX_IP>:{UPLOAD_DIR}/")
