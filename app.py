@@ -37,6 +37,28 @@ TMP_DIR.mkdir(exist_ok=True)
 
 _TIME_RE = re.compile(r'\b([01]?\d|2[0-3]):[0-5]\d:[0-5]\d\b')
 
+def read_status_safe(job_dir: Path):
+    p = job_dir / "status.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception:
+        return None
+
+MAX_CONCURRENT = 2
+
+def count_active_jobs():
+    n = 0
+    for jd in JOBS_DIR.glob("*"):
+        if not jd.is_dir():
+            continue
+        s = read_status_safe(jd)
+        # treat missing status or non-done as active
+        if not s or s.get("state") not in ("done", "error", "failed", "cancelled"):
+            n += 1
+    return n
+
 # ----------------------------
 # Download helpers
 # ----------------------------
@@ -162,12 +184,6 @@ def start_job(input_path: Path, clock_start: str | None = None, clock_roi: tuple
             start_new_session=True,
         )
     return job_dir
-
-def read_status(job_dir: Path):
-    p = job_dir / "status.json"
-    if not p.exists():
-        return None
-    return json.loads(p.read_text())
 
 def job_started_ts(jd: Path) -> float:
     s = read_status_safe(jd)
@@ -422,7 +438,14 @@ else:
     clock_start = st.session_state.get("first_clock_str")
     clock_roi = st.session_state.get("clock_roi")
 
-    if st.button("Process video", type="primary"):
+    active = count_active_jobs()
+    disabled = active >= MAX_CONCURRENT
+
+    if disabled:
+        st.warning(f"{active} job(s) active — max {MAX_CONCURRENT}. Please wait for one to finish.")
+
+
+    if st.button("Process video", type="primary", disabled=disabled):
         jd = start_job(
             selected,
             clock_start=clock_start,
@@ -432,15 +455,6 @@ else:
 
 ## List the jobs ##
 st.subheader("Jobs (latest first)")
-
-def read_status_safe(job_dir: Path):
-    p = job_dir / "status.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text())
-    except Exception:
-        return None
 
 def is_completed(status: dict | None) -> bool:
     if not status:
@@ -476,7 +490,7 @@ auto_refresh = st.checkbox("Auto-refresh while running", value=True)
 # Decide if we should refresh: only if any visible job is running
 running_any = False
 for jd in job_dirs[:10]:
-    s = read_status(jd)
+    s = read_status_safe(jd)
     if s and s.get("state") == "running":
         running_any = True
         break
