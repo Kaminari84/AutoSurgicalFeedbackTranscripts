@@ -414,7 +414,7 @@ else:
 
 
 ## Video PROCESS ##
-st.subheader("2) Process video (background job)")
+st.subheader("3) Process video")
 
 if selected is None:
     st.info("Choose or upload a video first.")
@@ -422,7 +422,7 @@ else:
     clock_start = st.session_state.get("first_clock_str")
     clock_roi = st.session_state.get("clock_roi")
 
-    if st.button("Start background job", type="primary"):
+    if st.button("Process video", type="primary"):
         jd = start_job(
             selected,
             clock_start=clock_start,
@@ -585,12 +585,3 @@ else:
 
         # Separator between jobs (helps even with borders)
         #st.divider()
-
-
-if selected is None:
-    st.info("Choose or upload a video first.")
-else:
-    if st.button("Run processing"):
-        # placeholder for your future pipeline
-        st.write("Processing:", selected.name)
-        st.success("Done (stub). Next: load model + run inference.")
